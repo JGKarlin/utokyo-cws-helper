@@ -45,8 +45,8 @@
 
 ### 1. ダウンロード
 
-- **[Releases ページ](https://github.com/JGKarlin/ut-cws-helper/releases)** から最新版の **ZIP ファイル** をダウンロードし、解凍してください。
-- または [リポジトリ](https://github.com/JGKarlin/ut-cws-helper) の **Code** → **Download ZIP** をクリックしてダウンロードし、解凍してください。
+- **[Releases ページ](https://github.com/JGKarlin/utokyo-cws-helper/releases)** から最新版の **ZIP ファイル** をダウンロードし、解凍してください。
+- または [リポジトリ](https://github.com/JGKarlin/utokyo-cws-helper) の **Code** → **Download ZIP** をクリックしてダウンロードし、解凍してください。
 
 ### 2. Chrome に読み込む
 
