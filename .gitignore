@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local backups
+就労管理システム.backup/

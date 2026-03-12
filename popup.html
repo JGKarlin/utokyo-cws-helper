@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>勤務時間 自動入力</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 340px;
+      font-family: "Hiragino Sans", "Meiryo", system-ui, sans-serif;
+      font-size: 13px;
+      background: #f5f6fa;
+      color: #2c3e50;
+    }
+
+    /* ── Header ─────────────────────────────────── */
+    .header {
+      background: #1a3a6b; color: #fff;
+      padding: 14px 16px 12px;
+      display: flex; align-items: center; gap: 9px;
+    }
+    .header-title { font-size: 15px; font-weight: 700; letter-spacing: 0.03em; }
+    .header-sub { font-size: 10px; opacity: 0.75; margin-top: 2px; }
+
+    /* ── Cards / Sections ───────────────────────── */
+    .card {
+      background: #fff; border-radius: 8px;
+      margin: 10px 10px 0; padding: 12px 14px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    }
+    .card-label {
+      font-size: 10px; font-weight: 700; color: #1a3a6b;
+      text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px;
+    }
+
+    /* ── Radio Groups ───────────────────────────── */
+    .radio-group { display: flex; gap: 6px; }
+    .radio-option { flex: 1; position: relative; }
+    .radio-option input[type="radio"] {
+      position: absolute; opacity: 0; width: 0; height: 0;
+    }
+    .radio-option label {
+      display: flex; align-items: center; justify-content: center; gap: 5px;
+      padding: 7px 10px; border: 1.5px solid #dde3ec; border-radius: 6px;
+      cursor: pointer; font-size: 12px; font-weight: 500; color: #6b7a90;
+      transition: all 0.15s ease; background: #f9fafc;
+    }
+    .radio-option input[type="radio"]:checked + label {
+      border-color: #1a3a6b; background: #eef2fa; color: #1a3a6b; font-weight: 700;
+    }
+    .radio-option label:hover { border-color: #1a3a6b; background: #f3f6fb; }
+    .radio-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      border: 2px solid currentColor; flex-shrink: 0;
+    }
+    .radio-option input[type="radio"]:checked + label .radio-dot {
+      background: #1971DA;
+    }
+
+    /* ── Manual Time Inputs ─────────────────────── */
+    #manualSection { display: none; }
+    .time-field-group { margin-bottom: 10px; }
+    .time-field-group:last-child { margin-bottom: 0; }
+    .time-field-label {
+      font-size: 11px; font-weight: 600; color: #4a5568;
+      margin-bottom: 5px; display: flex; align-items: center; gap: 5px;
+    }
+    .badge {
+      font-size: 9px; padding: 1px 5px; border-radius: 3px;
+      font-weight: 700; letter-spacing: 0.04em;
+    }
+    .badge-arrive { background: #e8f4e8; color: #2d6a2d; }
+    .badge-depart { background: #fde8e8; color: #8b2020; }
+
+    .time-range-row { display: flex; align-items: center; gap: 6px; }
+    .time-pair { display: flex; align-items: center; gap: 3px; }
+    .time-input {
+      width: 40px; padding: 5px 4px; border: 1.5px solid #dde3ec;
+      border-radius: 5px; font-size: 13px; font-weight: 600;
+      text-align: center; color: #2c3e50; background: #fafbfd;
+      outline: none; transition: border-color 0.15s;
+      -moz-appearance: textfield;
+    }
+    .time-input::-webkit-inner-spin-button,
+    .time-input::-webkit-outer-spin-button { -webkit-appearance: none; }
+    .time-input:focus { border-color: #1a3a6b; background: #fff; }
+    .time-sep { font-weight: 700; color: #4a5568; font-size: 14px; }
+    .range-arrow { color: #aab0bd; font-size: 14px; flex-shrink: 0; }
+
+    /* ── Date Input ─────────────────────────────── */
+    .date-range-row {
+      display: flex; align-items: flex-end; gap: 8px;
+    }
+    .date-field { flex: 1; min-width: 0; }
+    .date-field-label {
+      display: block; font-size: 10px; font-weight: 600; color: #4a5568;
+      margin-bottom: 4px;
+    }
+    .date-range-sep {
+      flex-shrink: 0; font-weight: 700; color: #aab0bd; font-size: 14px;
+      padding-bottom: 6px;
+    }
+    .date-input {
+      width: 100%; padding: 6px 8px; border: 1.5px solid #dde3ec;
+      border-radius: 5px; font-size: 13px; font-weight: 600;
+      color: #2c3e50; background: #fafbfd; outline: none;
+      font-family: inherit;
+    }
+    .date-input:focus { border-color: #1a3a6b; background: #fff; }
+    .date-hint { font-size: 10px; color: #9aa5b4; margin-top: 4px; }
+
+    /* ── Buttons ────────────────────────────────── */
+    .btn-group { display: flex; gap: 8px; margin: 10px 10px 0; }
+    .btn {
+      flex: 1; padding: 10px; border: none; border-radius: 7px;
+      font-size: 13px; font-weight: 700; font-family: inherit;
+      cursor: pointer; letter-spacing: 0.03em; transition: all 0.15s ease;
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+    }
+    .btn-start { background: #1a3a6b; color: #fff; }
+    .btn-start:hover:not(:disabled) { background: #0f2750; }
+    .btn-start:disabled { background: #8a9ab8; cursor: not-allowed; }
+    .btn-stop { background: #f1c40f; color: #2c3e50; display: none; }
+    .btn-stop:hover { background: #e6b800; }
+
+    /* ── Status Panel ───────────────────────────── */
+    .status-card {
+      margin: 10px; background: #fff; border-radius: 8px;
+      padding: 11px 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    }
+    .status-row {
+      display: flex; align-items: flex-start;
+      justify-content: space-between; margin-bottom: 6px;
+    }
+    .status-text {
+      font-size: 11px; color: #4a5568; font-weight: 500;
+      white-space: pre-line; line-height: 1.5;
+    }
+    .status-percent { font-size: 11px; color: #1a3a6b; font-weight: 700; }
+
+    progress {
+      width: 100%; height: 6px; border-radius: 3px;
+      overflow: hidden; border: none; background: #e8ecf4;
+    }
+    progress::-webkit-progress-bar { background: #e8ecf4; border-radius: 3px; }
+    progress::-webkit-progress-value {
+      background: linear-gradient(90deg, #1a3a6b, #3a6abf);
+      border-radius: 3px; transition: width 0.3s ease;
+    }
+    progress::-moz-progress-bar {
+      background: linear-gradient(90deg, #1a3a6b, #3a6abf); border-radius: 3px;
+    }
+    .error-box {
+      display: none; margin-top: 8px; padding: 7px 9px;
+      background: #fff5f5; border: 1px solid #f8b4b4; border-radius: 5px;
+      color: #c0392b; font-size: 11px; line-height: 1.5;
+    }
+    .error-box::before { content: "\26A0  "; }
+    .success-box {
+      display: none; margin-top: 8px; padding: 7px 9px;
+      background: #f0fff4; border: 1px solid #9ae6b4; border-radius: 5px;
+      color: #276749; font-size: 11px; line-height: 1.5; font-weight: 600;
+    }
+    .success-box::before { content: "\2713  "; }
+
+    /* ── Not on domain ──────────────────────────── */
+    .not-on-domain {
+      padding: 20px 16px; text-align: center; color: #6b7a90;
+      font-size: 12px; line-height: 1.6;
+    }
+    .not-on-domain .btn-open-system {
+      display: inline-block;
+      margin-top: 12px;
+      padding: 10px 18px;
+      background: #1a3a6b;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 700;
+      font-family: inherit;
+      text-decoration: none;
+      border: none;
+      border-radius: 7px;
+      cursor: pointer;
+      letter-spacing: 0.03em;
+      transition: background 0.15s ease;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+    }
+    .not-on-domain .btn-open-system:hover {
+      background: #0f2750;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <div class="header">
+    <img src="icons/icon48.png" alt="icon" width="32" height="32">
+    <div>
+      <div class="header-title">勤務時間 自動入力</div>
+      <div class="header-sub">東京大学 就労管理システム</div>
+    </div>
+  </div>
+
+  <!-- Not on domain message -->
+  <div id="notOnDomain" class="not-on-domain" style="display:none">
+    就労管理システムのページで使用してください。<br><br>
+    <a href="#" id="btnOpenSystem" class="btn-open-system">就労管理システムを開く</a>
+  </div>
+
+  <!-- Automation UI -->
+  <div id="automationUI" style="display:none">
+
+    <!-- Mode -->
+    <div class="card">
+      <div class="card-label">出退勤設定</div>
+      <div class="radio-group">
+        <div class="radio-option">
+          <input type="radio" name="mode" id="modeAuto" value="auto" checked>
+          <label for="modeAuto"><span class="radio-dot"></span>自動</label>
+        </div>
+        <div class="radio-option">
+          <input type="radio" name="mode" id="modeManual" value="manual">
+          <label for="modeManual"><span class="radio-dot"></span>手動</label>
+        </div>
+      </div>
+    </div>
+
+    <!-- Manual time settings -->
+    <div class="card" id="manualSection">
+      <div class="card-label">時刻範囲の設定</div>
+
+      <!-- 出勤 -->
+      <div class="time-field-group">
+        <div class="time-field-label">
+          <span class="badge badge-arrive">出勤</span> ランダム時刻の範囲
+        </div>
+        <div class="time-range-row">
+          <div class="time-pair">
+            <input type="number" class="time-input" id="arriveEarlyH" value="8" min="0" max="23">
+            <span class="time-sep">:</span>
+            <input type="text" inputmode="numeric" class="time-input" id="arriveEarlyM" value="45" maxlength="2">
+          </div>
+          <span class="range-arrow">〜</span>
+          <div class="time-pair">
+            <input type="number" class="time-input" id="arriveLatestH" value="10" min="0" max="23">
+            <span class="time-sep">:</span>
+            <input type="text" inputmode="numeric" class="time-input" id="arriveLatestM" value="00" maxlength="2">
+          </div>
+        </div>
+      </div>
+
+      <!-- 退勤 -->
+      <div class="time-field-group">
+        <div class="time-field-label">
+          <span class="badge badge-depart">退勤</span> ランダム時刻の範囲
+        </div>
+        <div class="time-range-row">
+          <div class="time-pair">
+            <input type="number" class="time-input" id="departEarlyH" value="17" min="0" max="23">
+            <span class="time-sep">:</span>
+            <input type="text" inputmode="numeric" class="time-input" id="departEarlyM" value="00" maxlength="2">
+          </div>
+          <span class="range-arrow">〜</span>
+          <div class="time-pair">
+            <input type="number" class="time-input" id="departLatestH" value="19" min="0" max="23">
+            <span class="time-sep">:</span>
+            <input type="text" inputmode="numeric" class="time-input" id="departLatestM" value="00" maxlength="2">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Date range -->
+    <div class="card">
+      <div class="card-label">対象期間</div>
+      <div class="date-range-row">
+        <div class="date-field">
+          <label for="startDate" class="date-field-label">開始日</label>
+          <input type="date" class="date-input" id="startDate">
+        </div>
+        <span class="date-range-sep">〜</span>
+        <div class="date-field">
+          <label for="endDate" class="date-field-label">終了日</label>
+          <input type="date" class="date-input" id="endDate">
+        </div>
+      </div>
+      <div class="date-hint">平日のみ対象</div>
+    </div>
+
+    <!-- Buttons -->
+    <div class="btn-group">
+      <button class="btn btn-start" id="btnStart">▶ 入力開始</button>
+      <button class="btn btn-stop" id="btnStop">■ 停止</button>
+    </div>
+
+    <!-- Status -->
+    <div class="status-card">
+      <div class="status-row">
+        <span class="status-text" id="statusText">待機中</span>
+        <span class="status-percent" id="statusPercent"></span>
+      </div>
+      <progress id="progressBar" value="0" max="100"></progress>
+      <div class="error-box" id="errorBox"></div>
+      <div class="success-box" id="successBox"></div>
+    </div>
+
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

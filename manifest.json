@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "勤務時間 自動入力",
+  "version": "2.0.0",
+  "description": "東京大学就労管理システム 自己申告記録 自動入力ツール",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "host_permissions": [
+    "https://ut-ppsweb.adm.u-tokyo.ac.jp/*"
+  ],
+  "icons": {
+    "16":  "icons/icon16.png",
+    "48":  "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "勤務時間 自動入力",
+    "default_icon": {
+      "16":  "icons/icon16.png",
+      "48":  "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://ut-ppsweb.adm.u-tokyo.ac.jp/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
