@@ -9,3 +9,6 @@
 
 # Local backups
 就労管理システム.backup/
+
+# Release artifacts
+*.zip
