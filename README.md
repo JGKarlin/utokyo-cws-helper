@@ -45,7 +45,7 @@ This extension is distributed as source code and must be loaded in Chrome’s De
 
 ### Step 1: Download the Extension
 
-1. Go to this extension’s GitHub repository.
+1. Go to the [GitHub repository](https://github.com/JGKarlin/work-hours-auto-entry).
 2. Click the green **Code** button.
 3. **Option A:** Click **Download ZIP** and extract the folder to a location on your computer (e.g., `Downloads` or `Documents`).
 4. **Option B:** If you use Git, run `git clone <repository-url>` and navigate into the cloned folder.
