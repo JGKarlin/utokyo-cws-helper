@@ -8,6 +8,13 @@ chrome.storage.session.setAccessLevel({
   accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS',
 });
 
+// Clicking the toolbar icon opens the UI in the side panel, which stays docked and
+// keeps showing live progress while the automation navigates the page between steps
+// (a normal toolbar popup would close the moment the tab navigates).
+try {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+} catch (_) {}
+
 const MAIN_CWS_URL = 'https://ut-ppsweb.adm.u-tokyo.ac.jp/cws/cws';
 const RETRY_ALARM = 'hrTermRetry';
 const RETRY_TIMEOUT_MS = 180000; // give a background retry up to 3 min, then close the tab
