@@ -37,6 +37,25 @@ function showNotification(title, message) {
   } catch (_) {}
 }
 
+// Is the UTokyo network reachable (on campus or via VPN)? The CWS host only answers
+// from inside the UTokyo network, so a resolved fetch means "connected". redirect:'manual'
+// lets a Shibboleth login redirect still count as reachable. Host permission lets the
+// service worker fetch it without CORS.
+async function isConnected(timeoutMs = 6000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    await fetch(MAIN_CWS_URL, {
+      method: 'GET', cache: 'no-store', redirect: 'manual', signal: controller.signal,
+    });
+    return true;
+  } catch (_) {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const DEFAULT_TERM_CONFIG = {
   arriveRange: { earlyH: 8, earlyM: 45, lateH: 10, lateM: 0 },
   departRange: { earlyH: 17, earlyM: 0, lateH: 19, lateM: 0 },
@@ -50,12 +69,14 @@ function prevMonthKey() {
   return `${y}-${String(m).padStart(2, '0')}`;
 }
 
-// ── Daily background check ─────────────────────────────────────────────────────
-// One daily alarm drives two things, both opening a hidden CWS tab and letting the
-// content-script submission machine do the work:
+// ── Periodic background check ──────────────────────────────────────────────────
+// One alarm (every few hours) drives two things, both opening a hidden CWS tab and
+// letting the content-script submission machine do the work:
 //   1. A blocked 月次申請 (hrPendingSubmit) — retried until the previous month is approved.
 //   2. Opt-in monthly auto-submit (hrAutoSubmitEnabled) — submits the previous month.
-// The alarm exists only while one of those is active.
+// Each firing first verifies connectivity (see runDailyCheck) and skips quietly when
+// off-network — so the frequent cadence is nearly free when you're off campus / no VPN.
+// The alarm exists only while one of those two is active.
 
 async function refreshDailyAlarm() {
   let need = false;
@@ -66,7 +87,7 @@ async function refreshDailyAlarm() {
   try {
     const existing = await chrome.alarms.get(RETRY_ALARM);
     if (need && !existing) {
-      chrome.alarms.create(RETRY_ALARM, { periodInMinutes: 1440, delayInMinutes: 1440 });
+      chrome.alarms.create(RETRY_ALARM, { periodInMinutes: 240, delayInMinutes: 30 });
     } else if (!need && existing) {
       await chrome.alarms.clear(RETRY_ALARM);
     }
@@ -123,10 +144,13 @@ async function runPendingRetry() {
 // Opt-in: submit the previous month automatically (the machine fetches 平日, enters any
 // missing hours, waits on prev-month approval, and submits — all quietly if nothing to do).
 async function runAutoSubmitCheck() {
-  const s = await chrome.storage.local.get(['hrAutoSubmitEnabled', 'hrPendingSubmit']);
+  const s = await chrome.storage.local.get(['hrAutoSubmitEnabled', 'hrPendingSubmit', 'hrTermStatusCache']);
   if (!s.hrAutoSubmitEnabled) { await refreshDailyAlarm(); return; }
   if (s.hrPendingSubmit) return; // a blocked submission is already being retried
   const target = prevMonthKey();
+  // Already submitted (per the last status scan) → nothing to do; don't reopen a tab.
+  const cached = s.hrTermStatusCache && s.hrTermStatusCache.months && s.hrTermStatusCache.months[target];
+  if (cached && cached.submitted) return;
   await driveSubmitInBackgroundTab({
     queue: [target], queueIndex: 0, targetMonth: target, phase: 'submit-nav',
     config: DEFAULT_TERM_CONFIG, workdaysByMonth: {}, navStep: null, auto: true,
@@ -135,9 +159,12 @@ async function runAutoSubmitCheck() {
 
 async function runDailyCheck() {
   const s = await chrome.storage.local.get(['hrPendingSubmit', 'hrAutoSubmitEnabled']);
+  if (!s.hrPendingSubmit && !s.hrAutoSubmitEnabled) { await refreshDailyAlarm(); return; }
+  // Only act when CWS is actually reachable (campus or VPN). Off-network, skip quietly
+  // without opening a tab — the next daily alarm will try again.
+  if (!(await isConnected())) return;
   if (s.hrPendingSubmit) { await runPendingRetry(); return; }
-  if (s.hrAutoSubmitEnabled) { await runAutoSubmitCheck(); return; }
-  await refreshDailyAlarm();
+  await runAutoSubmitCheck();
 }
 
 // Resolve once the submission flow signals done/error (hrAutoProgress) or it times out.
