@@ -1009,10 +1009,12 @@ function abortSubmit(sub, message) {
 }
 // Provisional — confirm/success pages not yet verified live (only used when not DRY_RUN).
 function findTermConfirmButton() {
+  // A successful 月次申請 shows a 確認 (confirmation) button on the next page; clicking
+  // it commits. (No password / 再認証 is required for 勤務表 submission.)
   for (const doc of getAccessibleDocuments()) {
     const cand = Array.from(doc.querySelectorAll('input[type="button"],input[type="submit"],button')).find(b => {
       const v = normalizeNavText(b.value || b.textContent || '');
-      return /確定|送信|申請する|はい|OK/.test(v) && v.indexOf('月次申請前') === -1;
+      return /確認|確定|送信|申請する|はい|OK/.test(v) && v.indexOf('月次申請前') === -1 && v !== '月次申請';
     });
     if (cand) return cand;
   }
