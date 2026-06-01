@@ -30,6 +30,12 @@ function sendError(message) {
   chrome.storage.session.set({ hrAutoProgress: { running: false, error: true, message } });
 }
 
+// Ask the background service worker to raise an OS/desktop notification (works even
+// when the side panel is closed — e.g. during the unattended daily retry).
+function notify(title, message) {
+  try { chrome.runtime.sendMessage({ type: 'NOTIFY', title, message }); } catch (_) {}
+}
+
 // ── DOM Utilities ─────────────────────────────────────────────────────────────
 function waitForElement(selector, timeout = 10000) {
   return new Promise((resolve, reject) => {
@@ -990,6 +996,17 @@ function clearSubmit() {
   chrome.storage.session.remove('hrAutoState');
   chrome.storage.session.remove('hrTermScan');
 }
+
+// Stop a submission. In unattended auto mode an expected no-op (e.g. the month is
+// already submitted / out of window) is silent; a manual run shows the message.
+function abortSubmit(sub, message) {
+  clearSubmit();
+  if (sub && sub.auto) {
+    chrome.storage.session.remove('hrAutoProgress');
+    return;
+  }
+  sendError(message);
+}
 // Provisional — confirm/success pages not yet verified live (only used when not DRY_RUN).
 function findTermConfirmButton() {
   for (const doc of getAccessibleDocuments()) {
@@ -1026,22 +1043,25 @@ async function markTermSubmitted(month) {
 // Previous period not finally approved → can't submit yet. Persist a pending record
 // (storage.local), ask the background to schedule the daily retry + notify, and stop.
 async function handleTermBlocked(sub, prevMonth, prevApproval) {
+  // Notify only the first time this month is blocked — not on every daily retry.
+  let alreadyNotified = false;
+  try {
+    const existing = (await chrome.storage.local.get('hrPendingSubmit')).hrPendingSubmit;
+    if (existing && existing.targetMonth === sub.targetMonth && existing.notified) alreadyNotified = true;
+  } catch (_) {}
+
   const pending = {
     queue: sub.queue, queueIndex: sub.queueIndex || 0, targetMonth: sub.targetMonth,
     prevMonth, prevApproval, config: sub.config, workdaysByMonth: sub.workdaysByMonth || {},
-    since: Date.now(),
+    since: Date.now(), notified: true,
   };
   try { await chrome.storage.local.set({ hrPendingSubmit: pending }); } catch (_) {}
   chrome.storage.session.remove('hrSubmitState');
   chrome.storage.session.remove('hrAutoState');
   try { chrome.runtime.sendMessage({ type: 'TERM_SCHEDULE_RETRY' }); } catch (_) {}
-  try {
-    chrome.runtime.sendMessage({
-      type: 'NOTIFY',
-      title: '月次申請を保留しました',
-      message: `${formatMonthLabel(sub.targetMonth)} は前月（${formatMonthLabel(prevMonth)}）の最終承認待ちのため申請できません。承認され次第、毎日自動で確認して申請します。`,
-    });
-  } catch (_) {}
+  if (!alreadyNotified) {
+    notify('月次申請を保留しました', `${formatMonthLabel(sub.targetMonth)} は前月（${formatMonthLabel(prevMonth)}）の最終承認待ちのため申請できません。承認され次第、毎日自動で確認して申請します。`);
+  }
   sendDone(`${formatMonthLabel(sub.targetMonth)} は前月（${formatMonthLabel(prevMonth)}）が最終承認されていないため、まだ申請できません。毎日自動で確認し、承認され次第申請します。`);
 }
 
@@ -1060,6 +1080,7 @@ async function advanceSubmitQueue(sub, submitted, dryRun) {
   if (dryRun) {
     sendDone(`（テスト実行）${n}件の月次申請を申請直前まで確認しました。実際の送信は行っていません。`);
   } else {
+    notify('月次申請が完了しました', `${n}件の月次申請が完了しました。`);
     sendDone(`${n}件の月次申請が完了しました。`);
   }
 }
@@ -1108,13 +1129,14 @@ async function runSubmitStateMachine(sub) {
           return runSubmitStateMachine(next);
         }
         if (!isMonthSubmittable()) {
-          sendError(`${labelOf(sub)} は月次申請の対象外です（提出期限切れ、または既に申請済みです）。`);
-          return clearSubmit();
+          // Already submitted or window closed — a quiet no-op for the unattended auto run.
+          return abortSubmit(sub, `${labelOf(sub)} は月次申請の対象外です（提出期限切れ、または既に申請済みです）。`);
         }
         const workdays = (sub.workdaysByMonth && sub.workdaysByMonth[sub.targetMonth]) || [];
         if (!workdays.length) {
-          sendError(`${labelOf(sub)} の平日情報を取得できませんでした`);
-          return clearSubmit();
+          // Workdays unknown (e.g. an unattended auto run) — fetch the month's 平日 first.
+          const next = await updateSubmit(sub, { phase: 'submit-scan-workdays' });
+          return runSubmitStateMachine(next);
         }
         const res = detectHoursComplete(workdays);
         if (res.error) { sendError(res.error); return clearSubmit(); }
@@ -1135,6 +1157,31 @@ async function runSubmitStateMachine(sub) {
         // entry finished (handoff in the 'success' branch reset us to submit-nav) — re-verify.
         const next = await updateSubmit(sub, { phase: 'submit-nav' });
         return runSubmitStateMachine(next);
+      }
+
+      case 'submit-scan-workdays': {
+        // Reach 本人用実績入力 and read the target month's 平日 (holiday-aware), then resume.
+        // Used when the caller didn't pre-scan workdays (the unattended auto run).
+        const target = sub.targetMonth;
+        if (sub.workdaysByMonth && (sub.workdaysByMonth[target] || []).length) {
+          return runSubmitStateMachine(await updateSubmit(sub, { phase: 'submit-ensure-month' }));
+        }
+        if (!isWorkdayCalendarPage()) {
+          const r = await clickWorkdayCalendarLink(); // multi-step nav across reloads
+          if (!r || !r.ready) {
+            sendProgress(`${labelOf(sub)}：平日を確認中...（${(r && r.step) || ''}）`, submitPercent(sub, 2));
+            return; // navigation in flight; re-enter on next page load
+          }
+        }
+        let dates;
+        try {
+          dates = await loadMonthForWorkdays(target); // in-page, no reload
+        } catch (e) {
+          return abortSubmit(sub, `${labelOf(sub)} の平日を取得できませんでした：${e.message}`);
+        }
+        await clearWorkdayScanNavStep();
+        const wbm = { ...(sub.workdaysByMonth || {}), [target]: dates };
+        return runSubmitStateMachine(await updateSubmit(sub, { phase: 'submit-ensure-month', workdaysByMonth: wbm }));
       }
 
       case 'submit-precheck': {
@@ -1180,8 +1227,7 @@ async function runSubmitStateMachine(sub) {
           return runSubmitStateMachine(next);
         }
         if (!isMonthSubmittable()) {
-          sendError(`${labelOf(sub)} は月次申請の対象外です。`);
-          return clearSubmit();
+          return abortSubmit(sub, `${labelOf(sub)} は月次申請の対象外です。`);
         }
         const btn = getTermEl('BTNSBMT0');
         if (!btn) { sendError('月次申請ボタンが見つかりません'); return clearSubmit(); }
@@ -1299,6 +1345,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       config: msg.config,
       workdaysByMonth: msg.workdaysByMonth || {},
       navStep: null,
+      auto: !!msg.auto,
     };
     chrome.storage.session.set({ hrSubmitState: sub });
     if (sub.targetMonth) {

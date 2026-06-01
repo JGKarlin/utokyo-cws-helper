@@ -206,6 +206,11 @@
     .term-blocked .term-month { font-weight: 700; }
     .term-busy { font-size: 11px; color: #6b7a90; }
     .term-hint { font-size: 10px; color: #9aa5b4; margin-top: 8px; line-height: 1.5; }
+    .term-toggle {
+      display: flex; align-items: center; gap: 7px; margin-bottom: 10px;
+      font-size: 11px; font-weight: 600; color: #2c3e50; cursor: pointer; user-select: none;
+    }
+    .term-toggle input { width: 14px; height: 14px; accent-color: #1a3a6b; cursor: pointer; flex-shrink: 0; }
 
     /* ── Not on domain ──────────────────────────── */
     .not-on-domain {
@@ -253,6 +258,10 @@
   <!-- 月次申請 (monthly report submission) -->
   <div class="card" id="termCard">
     <div class="card-label">月次申請</div>
+    <label class="term-toggle" for="autoSubmitToggle">
+      <input type="checkbox" id="autoSubmitToggle">
+      <span>毎月自動で申請する</span>
+    </label>
     <div id="termStatus" class="term-status">未提出の月を確認中...</div>
     <div id="termList"></div>
   </div>

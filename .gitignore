@@ -12,3 +12,6 @@
 
 # Release artifacts
 *.zip
+
+# Claude Code project guidance (local only)
+CLAUDE.md

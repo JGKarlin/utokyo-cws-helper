@@ -37,45 +37,50 @@ function showNotification(title, message) {
   } catch (_) {}
 }
 
-// ── Daily retry for a blocked 月次申請 ─────────────────────────────────────────
-// When a submission is blocked because the previous month isn't finally approved,
-// the content script records `hrPendingSubmit` (storage.local) and asks us to set a
-// daily alarm. Each firing opens a hidden CWS tab and re-runs the submission machine,
-// which re-checks the previous month's approval and submits once it clears.
+const DEFAULT_TERM_CONFIG = {
+  arriveRange: { earlyH: 8, earlyM: 45, lateH: 10, lateM: 0 },
+  departRange: { earlyH: 17, earlyM: 0, lateH: 19, lateM: 0 },
+};
 
-async function scheduleRetryAlarm() {
+function prevMonthKey() {
+  const d = new Date();
+  let y = d.getFullYear();
+  let m = d.getMonth(); // 0-based current month === previous month in 1-based terms
+  if (m === 0) { m = 12; y -= 1; }
+  return `${y}-${String(m).padStart(2, '0')}`;
+}
+
+// ── Daily background check ─────────────────────────────────────────────────────
+// One daily alarm drives two things, both opening a hidden CWS tab and letting the
+// content-script submission machine do the work:
+//   1. A blocked 月次申請 (hrPendingSubmit) — retried until the previous month is approved.
+//   2. Opt-in monthly auto-submit (hrAutoSubmitEnabled) — submits the previous month.
+// The alarm exists only while one of those is active.
+
+async function refreshDailyAlarm() {
+  let need = false;
+  try {
+    const s = await chrome.storage.local.get(['hrPendingSubmit', 'hrAutoSubmitEnabled']);
+    need = !!s.hrPendingSubmit || !!s.hrAutoSubmitEnabled;
+  } catch (_) {}
   try {
     const existing = await chrome.alarms.get(RETRY_ALARM);
-    if (!existing) {
+    if (need && !existing) {
       chrome.alarms.create(RETRY_ALARM, { periodInMinutes: 1440, delayInMinutes: 1440 });
+    } else if (!need && existing) {
+      await chrome.alarms.clear(RETRY_ALARM);
     }
   } catch (_) {}
 }
 
-async function clearRetryAlarm() {
-  try { await chrome.alarms.clear(RETRY_ALARM); } catch (_) {}
-}
-
 let retryInProgress = false;
 
-async function runPendingRetry() {
+// Set hrSubmitState, open a hidden CWS tab, let the content machine run, then clean up.
+async function driveSubmitInBackgroundTab(sub) {
   if (retryInProgress) return;
-  const { hrPendingSubmit } = await chrome.storage.local.get('hrPendingSubmit');
-  if (!hrPendingSubmit) { await clearRetryAlarm(); return; }
-
   retryInProgress = true;
   let tabId = null;
   try {
-    const sub = {
-      queue: (hrPendingSubmit.queue && hrPendingSubmit.queue.length)
-        ? hrPendingSubmit.queue : [hrPendingSubmit.targetMonth],
-      queueIndex: 0,
-      targetMonth: hrPendingSubmit.targetMonth,
-      phase: 'submit-nav',
-      config: hrPendingSubmit.config,
-      workdaysByMonth: hrPendingSubmit.workdaysByMonth || {},
-      navStep: null,
-    };
     await chrome.storage.session.remove('hrAutoProgress');
     await chrome.storage.session.set({ hrSubmitState: sub });
 
@@ -83,6 +88,13 @@ async function runPendingRetry() {
     tabId = tab.id;
 
     await waitForRetryCompletion(RETRY_TIMEOUT_MS);
+
+    // The side panel is closed during a background run, so surface a hard failure as a
+    // desktop notification (success/blocked already notify from content.js).
+    const { hrAutoProgress } = await chrome.storage.session.get('hrAutoProgress');
+    if (hrAutoProgress && hrAutoProgress.error) {
+      showNotification('月次申請に失敗しました', hrAutoProgress.message || 'エラーが発生しました。');
+    }
   } catch (_) {
     // best-effort; try again on the next alarm
   } finally {
@@ -90,6 +102,42 @@ async function runPendingRetry() {
     try { await chrome.storage.session.remove('hrSubmitState'); } catch (_) {}
     retryInProgress = false;
   }
+}
+
+async function runPendingRetry() {
+  const { hrPendingSubmit } = await chrome.storage.local.get('hrPendingSubmit');
+  if (!hrPendingSubmit) { await refreshDailyAlarm(); return; }
+  await driveSubmitInBackgroundTab({
+    queue: (hrPendingSubmit.queue && hrPendingSubmit.queue.length)
+      ? hrPendingSubmit.queue : [hrPendingSubmit.targetMonth],
+    queueIndex: 0,
+    targetMonth: hrPendingSubmit.targetMonth,
+    phase: 'submit-nav',
+    config: hrPendingSubmit.config || DEFAULT_TERM_CONFIG,
+    workdaysByMonth: hrPendingSubmit.workdaysByMonth || {},
+    navStep: null,
+    auto: true,
+  });
+}
+
+// Opt-in: submit the previous month automatically (the machine fetches 平日, enters any
+// missing hours, waits on prev-month approval, and submits — all quietly if nothing to do).
+async function runAutoSubmitCheck() {
+  const s = await chrome.storage.local.get(['hrAutoSubmitEnabled', 'hrPendingSubmit']);
+  if (!s.hrAutoSubmitEnabled) { await refreshDailyAlarm(); return; }
+  if (s.hrPendingSubmit) return; // a blocked submission is already being retried
+  const target = prevMonthKey();
+  await driveSubmitInBackgroundTab({
+    queue: [target], queueIndex: 0, targetMonth: target, phase: 'submit-nav',
+    config: DEFAULT_TERM_CONFIG, workdaysByMonth: {}, navStep: null, auto: true,
+  });
+}
+
+async function runDailyCheck() {
+  const s = await chrome.storage.local.get(['hrPendingSubmit', 'hrAutoSubmitEnabled']);
+  if (s.hrPendingSubmit) { await runPendingRetry(); return; }
+  if (s.hrAutoSubmitEnabled) { await runAutoSubmitCheck(); return; }
+  await refreshDailyAlarm();
 }
 
 // Resolve once the submission flow signals done/error (hrAutoProgress) or it times out.
@@ -108,23 +156,20 @@ function waitForRetryCompletion(timeoutMs) {
   });
 }
 
-// ── Messages from content scripts ─────────────────────────────────────────────
+// ── Messages from content scripts / UI ────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg) => {
   if (!msg) return;
   if (msg.type === 'NOTIFY') { showNotification(msg.title, msg.message); return; }
-  if (msg.type === 'TERM_SCHEDULE_RETRY') { scheduleRetryAlarm(); return; }
-  if (msg.type === 'TERM_CLEAR_RETRY') { clearRetryAlarm(); return; }
-  if (msg.type === 'TERM_RUN_RETRY_NOW') { runPendingRetry(); return; }
+  // All of these just reconcile the daily alarm with current storage state.
+  if (msg.type === 'TERM_SCHEDULE_RETRY' || msg.type === 'TERM_CLEAR_RETRY' ||
+      msg.type === 'AUTO_SUBMIT_SCHEDULE') { refreshDailyAlarm(); return; }
+  if (msg.type === 'TERM_RUN_RETRY_NOW') { runDailyCheck(); return; }
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === RETRY_ALARM) runPendingRetry();
+  if (alarm.name === RETRY_ALARM) runDailyCheck();
 });
 
-// Re-arm the alarm on browser startup if a submission is still pending.
-chrome.runtime.onStartup.addListener(async () => {
-  try {
-    const { hrPendingSubmit } = await chrome.storage.local.get('hrPendingSubmit');
-    if (hrPendingSubmit) scheduleRetryAlarm();
-  } catch (_) {}
-});
+// Re-arm (or clear) the alarm on browser startup based on current state.
+chrome.runtime.onStartup.addListener(() => { refreshDailyAlarm(); });
+chrome.runtime.onInstalled.addListener(() => { refreshDailyAlarm(); });

@@ -651,17 +651,19 @@ function renderTermSection(cache, pending, failMsg) {
     list.appendChild(wrap);
   }
 
+  card.style.display = 'block';
   if (shown) {
     status.style.display = 'none';
     const hint = document.createElement('div');
     hint.className = 'term-hint';
     hint.textContent = '※月次申請は取り消せません。';
     list.appendChild(hint);
-    card.style.display = 'block';
   } else if (failMsg) {
-    setTermStatus(failMsg);
+    status.style.display = 'block';
+    status.textContent = failMsg;
   } else {
-    card.style.display = 'none';
+    status.style.display = 'block';
+    status.textContent = '未提出の月はありません。';
   }
 }
 
@@ -734,6 +736,30 @@ document.getElementById('termList').addEventListener('click', (e) => {
   if (!btn || !btn.dataset.month) return;
   startTermSubmission([btn.dataset.month]);
 });
+
+// ── Opt-in: 毎月自動で申請する (off by default) ─────────────────────────────────
+const TERM_AUTO_KEY = 'hrAutoSubmitEnabled';
+(async () => {
+  const el = document.getElementById('autoSubmitToggle');
+  if (!el) return;
+  document.getElementById('termCard').style.display = 'block';
+  const stored = (await chrome.storage.local.get(TERM_AUTO_KEY))[TERM_AUTO_KEY];
+  el.checked = !!stored;
+  el.addEventListener('change', async () => {
+    if (el.checked) {
+      const ok = window.confirm(
+        '毎月、前月分の月次申請を自動で行います。\n\n' +
+        '必要な勤務時間を自動入力し、前月の承認を待って自動的に申請します（月次申請は取り消せません）。\n\n' +
+        '有効にしますか？'
+      );
+      if (!ok) { el.checked = false; return; }
+      await chrome.storage.local.set({ [TERM_AUTO_KEY]: true });
+    } else {
+      await chrome.storage.local.set({ [TERM_AUTO_KEY]: false });
+    }
+    try { chrome.runtime.sendMessage({ type: 'AUTO_SUBMIT_SCHEDULE' }); } catch (_) {}
+  });
+})();
 
 // Kick off discovery on popup open (scan only when on the CWS domain / logged in).
 (async () => {
