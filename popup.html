@@ -24,6 +24,34 @@
     .header-title { font-size: 15px; font-weight: 700; letter-spacing: 0.03em; }
     .header-sub { font-size: 10px; opacity: 0.75; margin-top: 2px; }
 
+    /* ── Network connection indicator ───────────────── */
+    .net-status {
+      margin-left: auto; flex-shrink: 0;
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 4px 9px; border-radius: 999px;
+      font-size: 10px; font-weight: 700; letter-spacing: 0.03em;
+      background: rgba(255,255,255,0.12);
+      cursor: pointer; user-select: none; white-space: nowrap;
+      transition: background 0.15s ease;
+    }
+    .net-status:hover { background: rgba(255,255,255,0.22); }
+    .net-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #b8c2d4; flex-shrink: 0;
+    }
+    .net-status--checking { color: #ffe9a8; }
+    .net-status--checking .net-dot {
+      background: #f1c40f; animation: net-pulse 1s ease-in-out infinite;
+    }
+    .net-status--online  { color: #d4f8e0; }
+    .net-status--online  .net-dot { background: #2ecc71; }
+    .net-status--offline { color: #ffd4d0; }
+    .net-status--offline .net-dot { background: #e74c3c; }
+    @keyframes net-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
     /* ── Cards / Sections ───────────────────────── */
     .card {
       background: #fff; border-radius: 8px;
@@ -165,6 +193,20 @@
     }
     .success-box::before { content: "\2713  "; }
 
+    /* ── 月次申請 card ──────────────────────────── */
+    #termCard { display: none; margin-top: 10px; }
+    .term-status { font-size: 11px; color: #4a5568; margin-bottom: 9px; line-height: 1.5; }
+    .term-item { margin-bottom: 8px; }
+    .term-item:last-child { margin-bottom: 0; }
+    .term-submit-btn { width: 100%; }
+    .term-blocked {
+      padding: 8px 10px; border-radius: 6px; background: #fff8e6;
+      border: 1px solid #f3d27a; color: #8a6d1a; font-size: 11px; line-height: 1.55;
+    }
+    .term-blocked .term-month { font-weight: 700; }
+    .term-busy { font-size: 11px; color: #6b7a90; }
+    .term-hint { font-size: 10px; color: #9aa5b4; margin-top: 8px; line-height: 1.5; }
+
     /* ── Not on domain ──────────────────────────── */
     .not-on-domain {
       padding: 20px 16px; text-align: center; color: #6b7a90;
@@ -201,6 +243,18 @@
       <div class="header-title">勤務時間 自動入力</div>
       <div class="header-sub">東京大学 就労管理システム</div>
     </div>
+    <div id="netStatus" class="net-status net-status--checking" role="status"
+         title="UTokyoネットワークへの接続を確認しています...">
+      <span class="net-dot"></span>
+      <span class="net-label" id="netStatusLabel">確認中</span>
+    </div>
+  </div>
+
+  <!-- 月次申請 (monthly report submission) -->
+  <div class="card" id="termCard">
+    <div class="card-label">月次申請</div>
+    <div id="termStatus" class="term-status">未提出の月を確認中...</div>
+    <div id="termList"></div>
   </div>
 
   <!-- Not on domain message -->

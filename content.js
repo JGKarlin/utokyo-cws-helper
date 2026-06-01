@@ -321,13 +321,28 @@ function advanceState(state) {
 async function runStateMachine() {
   let result;
   try {
-    result = await chrome.storage.session.get(['hrAutoState', 'hrScanActive']);
+    result = await chrome.storage.session.get(['hrAutoState', 'hrScanActive', 'hrSubmitState']);
   } catch { return; }
 
-  if (result.hrScanActive) return;
+  if (result.hrScanActive) {
+    // Stand down while a popup-driven scan is running — but self-heal if a closed
+    // popup left the flag stuck (no/old timestamp), so automation never wedges.
+    let since = null;
+    try { since = (await chrome.storage.session.get('hrScanStartedAt')).hrScanStartedAt; } catch {}
+    if (!since || Date.now() - since < 120000) return;
+    try { await chrome.storage.session.remove(['hrScanActive', 'hrScanStartedAt']); } catch {}
+  }
 
   const state = result.hrAutoState;
-  if (!state) return;
+  if (!state) {
+    // No clockin/clockout entry in progress — drive the 月次申請 machine if active.
+    if (result.hrSubmitState) {
+      await delay(1200);
+      if (shouldStop) { clearSubmit(); return; }
+      await runSubmitStateMachine(result.hrSubmitState);
+    }
+    return;
+  }
 
   // Delay to let page settle (longer for iframe-based pages)
   await delay(1200);
@@ -750,6 +765,479 @@ async function scanWorkdaysForMonth(monthKey) {
   return loadMonthForWorkdays(monthKey);
 }
 
+// ── 月次申請 (monthly report submission) ───────────────────────────────────────
+// Reaches the 勤務表 page, reads which past months still need 月次申請, and — after
+// the existing engine fills any missing 平日 hours — submits via the 月次申請 button.
+//
+// SAFETY: TERM_SUBMIT_DRY_RUN gates the irreversible 月次申請 click. While true, the
+// whole flow runs end-to-end but stops just before clicking 月次申請 (logs instead).
+// Flip to false only after the confirm/success pages are verified on the live site.
+const TERM_SUBMIT_DRY_RUN = true;
+const MAX_TERM_LOOKBACK = 12;
+
+// 勤務表 navigation works by link text (confirmed on the live site).
+function findLinkByText(text) {
+  const target = normalizeNavText(text);
+  return findNavigationElement(el => el.tagName === 'A' && normalizeNavText(el.textContent) === target);
+}
+
+function getTermForm() {
+  for (const doc of getAccessibleDocuments()) {
+    try { const f = doc.forms && doc.forms['FormListPersonalDetails']; if (f) return f; } catch (_) {}
+  }
+  return null;
+}
+function isTermPage() { return !!getTermForm(); }
+function getTermEl(id) {
+  for (const doc of getAccessibleDocuments()) {
+    try { const el = doc.getElementById(id); if (el) return el; } catch (_) {}
+  }
+  return null;
+}
+// The header/nav band that holds "本日は…", the YYYY年MM月 label, and ＜＜ / ＞＞.
+function getTermNavText() {
+  const prev = getTermEl('TOPRVTM');
+  if (!prev) return '';
+  let anc = prev;
+  for (let k = 0; k < 6 && anc; k++) anc = anc.parentElement;
+  return normalizeDigits(anc ? (anc.textContent || '') : '').replace(/\s+/g, '');
+}
+// Displayed month = the last YYYY年MM月 token BEFORE ＜＜ (the nav text also
+// contains "本日は…" = today, so a naive first-match would be wrong).
+function readDisplayedTermMonth() {
+  const nav = getTermNavText();
+  if (nav) {
+    const left = nav.split('＜＜')[0];
+    const ms = [...left.matchAll(/(\d{4})年(\d{1,2})月/g)];
+    if (ms.length) {
+      const m = ms[ms.length - 1];
+      return `${m[1]}-${String(parseInt(m[2], 10)).padStart(2, '0')}`;
+    }
+  }
+  const form = getTermForm();
+  if (form) {
+    const ft = normalizeDigits(form.textContent || '').replace(/\s+/g, '');
+    const r = ft.match(/(\d{4})年(\d{1,2})月\d{1,2}日[^～]*～/);
+    if (r) return `${r[1]}-${String(parseInt(r[2], 10)).padStart(2, '0')}`;
+  }
+  return null;
+}
+function currentMonthKey() {
+  const nav = getTermNavText();
+  const m = nav.match(/本日は(\d{4})年(\d{1,2})月/);
+  if (m) return `${m[1]}-${String(parseInt(m[2], 10)).padStart(2, '0')}`;
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+// A month is submittable iff the 月次申請 button is present and enabled (confirmed:
+// closed/past months have no button; the actionable month does).
+function isMonthSubmittable() {
+  const btn = getTermEl('BTNSBMT0');
+  return !!btn && !btn.disabled;
+}
+function monthDelta(a, b) {
+  const [ay, am] = a.split('-').map(Number);
+  const [by, bm] = b.split('-').map(Number);
+  return (ay * 12 + am) - (by * 12 + bm);
+}
+// Locate the daily 勤務表 table + the 自己申告記録（出勤/退勤）column indices by header text.
+function detectTermTable() {
+  const form = getTermForm();
+  if (!form) return null;
+  for (const t of form.querySelectorAll('table')) {
+    for (const r of Array.from(t.rows).slice(0, 3)) {
+      const hs = Array.from(r.cells).map(c => normalizeNavText(c.textContent));
+      const inCol = hs.findIndex(x => x.indexOf('自己申告記録（出勤') !== -1);
+      if (inCol !== -1) {
+        const outCol = hs.findIndex(x => x.indexOf('自己申告記録（退勤') !== -1);
+        return { table: t, inCol, outCol: outCol !== -1 ? outCol : inCol + 1 };
+      }
+    }
+  }
+  return null;
+}
+// Given the month's 平日 (yyyy-mm-dd, from the existing workday scan), report which
+// of them still lack times in the 勤務表 (time format is HH時MM分). Header rows are
+// repeated mid-table, so skip any row whose first cell is 月日/曜日.
+function detectHoursComplete(workdays) {
+  const info = detectTermTable();
+  if (!info) return { complete: false, missing: [], error: '勤務表の勤務時間表が見つかりません' };
+  const { table, inCol, outCol } = info;
+  const timeRe = /\d{1,2}時\d{1,2}分/;
+  const dayMap = {};
+  for (const row of table.rows) {
+    const cells = row.cells;
+    if (cells.length <= Math.max(inCol, outCol)) continue;
+    const d0 = normalizeDigits(cells[0].textContent || '').trim();
+    if (d0.indexOf('月日') !== -1 || d0.indexOf('曜日') !== -1) continue;
+    let dd = null;
+    const md = d0.match(/(\d{1,2})\s*\/\s*(\d{1,2})/);
+    if (md) dd = parseInt(md[2], 10);
+    else { const d2 = d0.match(/(\d{1,2})日/); if (d2) dd = parseInt(d2[1], 10); }
+    if (dd == null || dd < 1 || dd > 31) continue;
+    const inT = normalizeDigits(cells[inCol].textContent || '');
+    const outT = normalizeDigits(cells[outCol].textContent || '');
+    dayMap[dd] = timeRe.test(inT) && timeRe.test(outT);
+  }
+  const missing = [];
+  for (const wd of (workdays || [])) {
+    const dd = parseInt(wd.split('-')[2], 10);
+    if (!dayMap[dd]) missing.push(wd);
+  }
+  return { complete: missing.length === 0, missing };
+}
+
+// Read a month's approval status from the 【処理状況】 table (located by its header
+// cells 担当者/結果/処理日/コメント). The 結果 column is authoritative:
+//   no rows → 'none' (not submitted); any 差戻 → 'returned';
+//   any 未処理 → 'pending' (submitted, awaiting approval); all 承認 → 'approved'.
+function readTermApprovalStatus() {
+  const form = getTermForm();
+  if (!form) return 'unknown';
+  let table = null, resIdx = -1;
+  for (const t of form.querySelectorAll('table')) {
+    for (const r of Array.from(t.rows).slice(0, 2)) {
+      const cs = Array.from(r.cells).map(c => normalizeNavText(c.textContent));
+      if (cs.indexOf('担当者') !== -1 && cs.indexOf('結果') !== -1 && cs.indexOf('処理日') !== -1) {
+        table = t; resIdx = cs.indexOf('結果'); break;
+      }
+    }
+    if (table) break;
+  }
+  if (!table) return 'none';
+  const results = [];
+  for (const row of table.rows) {
+    const c = row.cells[resIdx];
+    if (!c) continue;
+    const v = normalizeNavText(c.textContent);
+    if (!v || v === '結果') continue;
+    results.push(v);
+  }
+  if (!results.length) return 'none';
+  if (results.some(v => v.indexOf('差戻') !== -1)) return 'returned';
+  if (results.some(v => v.indexOf('未処理') !== -1)) return 'pending';
+  if (results.every(v => v.indexOf('承認') !== -1)) return 'approved';
+  return 'pending';
+}
+
+function monthMinus(monthKey, n) {
+  let [y, m] = monthKey.split('-').map(Number);
+  m -= n;
+  while (m <= 0) { m += 12; y -= 1; }
+  return `${y}-${String(m).padStart(2, '0')}`;
+}
+
+// The 月次申請 was rejected because the previous period isn't finally approved.
+function isPrevApprovalBlocked() {
+  const form = getTermForm();
+  if (!form) return false;
+  return normalizeDigits(form.textContent || '').indexOf('最終承認されていないため送信できません') !== -1;
+}
+
+// Navigate toward the 勤務表: メインメニュー → 就労管理(text) → 勤務表(text).
+// Returns the popup-poll shape: { ready } | { navigating, step, waitMs }.
+async function prepareTermPage() {
+  if (isTermPage()) return { ready: true };
+  const termLink = findLinkByText('勤務表');
+  if (termLink) { activateElement(termLink); return { navigating: true, step: '勤務表へ移動中...', waitMs: 1500 }; }
+  const workLink = findLinkByText('就労管理');
+  if (workLink) { activateElement(workLink); return { navigating: true, step: '就労管理へ移動中...', waitMs: 1500 }; }
+  window.location.href = MAIN_CWS_URL;
+  return { navigating: true, step: 'メインメニューへ移動中...', waitMs: 1800 };
+}
+
+// One resumable step of the backward status walk (driven by the popup across the
+// full-page reloads that ＜＜ triggers). Records each month's submittable flag and
+// stops at the first PAST month whose 月次申請 button is gone (window closed).
+async function termScanStep() {
+  if (!isTermPage()) return { navigating: true, step: '勤務表の読み込み待ち...', waitMs: 1000 };
+  const month = readDisplayedTermMonth();
+  if (!month) return { error: '勤務表の対象月を読み取れませんでした' };
+  const current = currentMonthKey();
+  const r = await chrome.storage.session.get('hrTermScan');
+  const scan = r.hrTermScan || { collected: {}, steps: 0 };
+  scan.collected[month] = { month, label: formatMonthLabel(month), submittable: isMonthSubmittable(), approval: readTermApprovalStatus() };
+  scan.steps = (scan.steps || 0) + 1;
+  const pastClosed = monthDelta(month, current) < 0 && !scan.collected[month].submittable;
+  if (pastClosed || scan.steps >= MAX_TERM_LOOKBACK) {
+    await chrome.storage.session.remove('hrTermScan');
+    return { done: true, months: scan.collected, current };
+  }
+  await chrome.storage.session.set({ hrTermScan: scan });
+  const prev = getTermEl('TOPRVTM');
+  if (!prev) {
+    await chrome.storage.session.remove('hrTermScan');
+    return { done: true, months: scan.collected, current };
+  }
+  activateElement(prev);
+  return { navigating: true, step: `${formatMonthLabel(month)}を確認中...`, waitMs: 1500 };
+}
+
+// ── Submission state machine (persistent, parallel to clockin/clockout) ─────────
+function labelOf(sub) { return formatMonthLabel(sub.targetMonth); }
+function submitPercent(sub, intra) {
+  const total = (sub.queue && sub.queue.length) || 1;
+  const done = sub.queueIndex || 0;
+  return Math.min(99, Math.round(((done + intra / 100) / total) * 100));
+}
+async function updateSubmit(sub, patch) {
+  const next = { ...sub, ...patch };
+  await chrome.storage.session.set({ hrSubmitState: next });
+  return next;
+}
+function clearSubmit() {
+  chrome.storage.session.remove('hrSubmitState');
+  chrome.storage.session.remove('hrAutoState');
+  chrome.storage.session.remove('hrTermScan');
+}
+// Provisional — confirm/success pages not yet verified live (only used when not DRY_RUN).
+function findTermConfirmButton() {
+  for (const doc of getAccessibleDocuments()) {
+    const cand = Array.from(doc.querySelectorAll('input[type="button"],input[type="submit"],button')).find(b => {
+      const v = normalizeNavText(b.value || b.textContent || '');
+      return /確定|送信|申請する|はい|OK/.test(v) && v.indexOf('月次申請前') === -1;
+    });
+    if (cand) return cand;
+  }
+  return findSubmitButton(document);
+}
+function detectTermSubmissionSuccess(month) {
+  if (isTermPage() && readDisplayedTermMonth() === month && !isMonthSubmittable()) return true;
+  const txt = getAccessibleDocuments().map(d => normalizeNavText(d.body ? d.body.textContent : '')).join('');
+  return /申請しました|受け付けました|申請を受付|正常に処理/.test(txt);
+}
+async function markTermSubmitted(month) {
+  try {
+    const r = await chrome.storage.local.get('hrTermStatusCache');
+    const cache = r.hrTermStatusCache || { months: {} };
+    if (!cache.months) cache.months = {};
+    cache.months[month] = { ...(cache.months[month] || {}), submittable: false, submitted: true, approval: 'pending' };
+    await chrome.storage.local.set({ hrTermStatusCache: cache });
+  } catch (_) {}
+  // A pending background retry for this month is now satisfied — clear it.
+  try {
+    const { hrPendingSubmit } = await chrome.storage.local.get('hrPendingSubmit');
+    if (hrPendingSubmit && hrPendingSubmit.targetMonth === month) {
+      await chrome.storage.local.remove('hrPendingSubmit');
+      chrome.runtime.sendMessage({ type: 'TERM_CLEAR_RETRY' });
+    }
+  } catch (_) {}
+}
+// Previous period not finally approved → can't submit yet. Persist a pending record
+// (storage.local), ask the background to schedule the daily retry + notify, and stop.
+async function handleTermBlocked(sub, prevMonth, prevApproval) {
+  const pending = {
+    queue: sub.queue, queueIndex: sub.queueIndex || 0, targetMonth: sub.targetMonth,
+    prevMonth, prevApproval, config: sub.config, workdaysByMonth: sub.workdaysByMonth || {},
+    since: Date.now(),
+  };
+  try { await chrome.storage.local.set({ hrPendingSubmit: pending }); } catch (_) {}
+  chrome.storage.session.remove('hrSubmitState');
+  chrome.storage.session.remove('hrAutoState');
+  try { chrome.runtime.sendMessage({ type: 'TERM_SCHEDULE_RETRY' }); } catch (_) {}
+  try {
+    chrome.runtime.sendMessage({
+      type: 'NOTIFY',
+      title: '月次申請を保留しました',
+      message: `${formatMonthLabel(sub.targetMonth)} は前月（${formatMonthLabel(prevMonth)}）の最終承認待ちのため申請できません。承認され次第、毎日自動で確認して申請します。`,
+    });
+  } catch (_) {}
+  sendDone(`${formatMonthLabel(sub.targetMonth)} は前月（${formatMonthLabel(prevMonth)}）が最終承認されていないため、まだ申請できません。毎日自動で確認し、承認され次第申請します。`);
+}
+
+async function advanceSubmitQueue(sub, submitted, dryRun) {
+  if (submitted) await markTermSubmitted(sub.targetMonth);
+  const nextIndex = (sub.queueIndex || 0) + 1;
+  if (nextIndex < sub.queue.length) {
+    const nextMonth = sub.queue[nextIndex];
+    const next = await updateSubmit(sub, { queueIndex: nextIndex, targetMonth: nextMonth, phase: 'submit-ensure-month', navStep: null });
+    sendProgress(`次の対象月（${formatMonthLabel(nextMonth)}）を処理します...`, submitPercent(next, 0));
+    return runSubmitStateMachine(next);
+  }
+  chrome.storage.session.remove('hrSubmitState');
+  chrome.storage.session.remove('hrAutoState');
+  const n = sub.queue.length;
+  if (dryRun) {
+    sendDone(`（テスト実行）${n}件の月次申請を申請直前まで確認しました。実際の送信は行っていません。`);
+  } else {
+    sendDone(`${n}件の月次申請が完了しました。`);
+  }
+}
+
+async function runSubmitStateMachine(sub) {
+  try {
+    switch (sub.phase) {
+      case 'submit-nav': {
+        const r = await prepareTermPage();
+        if (r.ready) {
+          const next = await updateSubmit(sub, { phase: 'submit-ensure-month' });
+          return runSubmitStateMachine(next);
+        }
+        sendProgress(`${labelOf(sub)}：勤務表へ移動中...`, submitPercent(sub, 4));
+        return; // navigation in flight; re-enter on next page load
+      }
+
+      case 'submit-ensure-month': {
+        if (!isTermPage()) {
+          const next = await updateSubmit(sub, { phase: 'submit-nav' });
+          return runSubmitStateMachine(next);
+        }
+        const cur = readDisplayedTermMonth();
+        if (!cur) { sendError('勤務表の対象月を読み取れませんでした'); return clearSubmit(); }
+        if (cur === sub.targetMonth) {
+          const next = await updateSubmit(sub, { phase: 'submit-check-hours', navStep: null });
+          return runSubmitStateMachine(next);
+        }
+        const count = (sub.navStep && sub.navStep.count) || 0;
+        if (count > MAX_TERM_LOOKBACK + 2) {
+          sendError(`${labelOf(sub)} の勤務表へ移動できませんでした`);
+          return clearSubmit();
+        }
+        const goBack = monthDelta(sub.targetMonth, cur) < 0;
+        const btn = goBack ? getTermEl('TOPRVTM') : getTermEl('TONXTTM');
+        if (!btn) { sendError('月移動ボタンが見つかりません'); return clearSubmit(); }
+        await updateSubmit(sub, { navStep: { count: count + 1 } });
+        sendProgress(`${labelOf(sub)}：対象月へ移動中...（現在 ${formatMonthLabel(cur)}）`, submitPercent(sub, 8));
+        activateElement(btn); // full reload → re-enter
+        return;
+      }
+
+      case 'submit-check-hours': {
+        if (!isTermPage() || readDisplayedTermMonth() !== sub.targetMonth) {
+          const next = await updateSubmit(sub, { phase: 'submit-ensure-month' });
+          return runSubmitStateMachine(next);
+        }
+        if (!isMonthSubmittable()) {
+          sendError(`${labelOf(sub)} は月次申請の対象外です（提出期限切れ、または既に申請済みです）。`);
+          return clearSubmit();
+        }
+        const workdays = (sub.workdaysByMonth && sub.workdaysByMonth[sub.targetMonth]) || [];
+        if (!workdays.length) {
+          sendError(`${labelOf(sub)} の平日情報を取得できませんでした`);
+          return clearSubmit();
+        }
+        const res = detectHoursComplete(workdays);
+        if (res.error) { sendError(res.error); return clearSubmit(); }
+        if (res.complete) {
+          // Hours done. Verify the previous period is approved before submitting (unless already checked).
+          const next = await updateSubmit(sub, { phase: sub.prechecked ? 'submit-click' : 'submit-precheck' });
+          return runSubmitStateMachine(next);
+        }
+        sendProgress(`${labelOf(sub)}：未入力の勤務時間（${res.missing.length}日分）を入力します...`, submitPercent(sub, 15));
+        await chrome.storage.session.set({ hrAutoState: { phase: 'clockin', dates: res.missing, dateIndex: 0, config: sub.config } });
+        await updateSubmit(sub, { phase: 'submit-entering' });
+        navigateToApplicationMenu(); // hand off to the existing clockin/clockout machine
+        return;
+      }
+
+      case 'submit-entering': {
+        // The existing machine owns the page while hrAutoState exists. If we reach here,
+        // entry finished (handoff in the 'success' branch reset us to submit-nav) — re-verify.
+        const next = await updateSubmit(sub, { phase: 'submit-nav' });
+        return runSubmitStateMachine(next);
+      }
+
+      case 'submit-precheck': {
+        // Navigate to the previous month to read its 処理状況 (approval) before submitting.
+        if (!isTermPage() || readDisplayedTermMonth() !== sub.targetMonth) {
+          const next = await updateSubmit(sub, { phase: 'submit-ensure-month' });
+          return runSubmitStateMachine(next);
+        }
+        const prevMonth = monthMinus(sub.targetMonth, 1);
+        const btn = getTermEl('TOPRVTM');
+        if (!btn) { sendError('前月へ移動できませんでした'); return clearSubmit(); }
+        await updateSubmit(sub, { phase: 'submit-precheck-read', prevMonth, navStep: { count: 0 } });
+        sendProgress(`${labelOf(sub)}：前月（${formatMonthLabel(prevMonth)}）の承認状況を確認中...`, submitPercent(sub, 70));
+        activateElement(btn); // full reload → re-enter on submit-precheck-read
+        return;
+      }
+
+      case 'submit-precheck-read': {
+        if (!isTermPage()) return; // wait for the reload
+        const cur = readDisplayedTermMonth();
+        if (cur !== sub.prevMonth) {
+          const count = (sub.navStep && sub.navStep.count) || 0;
+          if (count > MAX_TERM_LOOKBACK + 2) { sendError('前月へ移動できませんでした'); return clearSubmit(); }
+          const goBack = monthDelta(sub.prevMonth, cur) < 0;
+          const btn = goBack ? getTermEl('TOPRVTM') : getTermEl('TONXTTM');
+          if (!btn) { sendError('前月へ移動できませんでした'); return clearSubmit(); }
+          await updateSubmit(sub, { navStep: { count: count + 1 } });
+          activateElement(btn);
+          return;
+        }
+        const approval = readTermApprovalStatus();
+        if (approval === 'approved') {
+          // Clear to submit: return to the target month, then submit.
+          const next = await updateSubmit(sub, { phase: 'submit-ensure-month', prechecked: true, navStep: null });
+          return runSubmitStateMachine(next);
+        }
+        return handleTermBlocked(sub, sub.prevMonth, approval);
+      }
+
+      case 'submit-click': {
+        if (!isTermPage() || readDisplayedTermMonth() !== sub.targetMonth) {
+          const next = await updateSubmit(sub, { phase: 'submit-ensure-month' });
+          return runSubmitStateMachine(next);
+        }
+        if (!isMonthSubmittable()) {
+          sendError(`${labelOf(sub)} は月次申請の対象外です。`);
+          return clearSubmit();
+        }
+        const btn = getTermEl('BTNSBMT0');
+        if (!btn) { sendError('月次申請ボタンが見つかりません'); return clearSubmit(); }
+        if (TERM_SUBMIT_DRY_RUN) {
+          console.log('[HR Term Submit] DRY-RUN: would click 月次申請 for', sub.targetMonth);
+          sendProgress(`（テスト実行）${labelOf(sub)} の月次申請手前まで確認しました（未送信）。`, submitPercent(sub, 90));
+          return advanceSubmitQueue(sub, false, true);
+        }
+        sendProgress(`${labelOf(sub)}：月次申請を送信中...`, submitPercent(sub, 85));
+        await updateSubmit(sub, { phase: 'submit-confirm' });
+        activateElement(btn); // onclick → PreparePersonalTermSubmissionAction → form.submit() (full reload)
+        return;
+      }
+
+      case 'submit-confirm': {
+        // Fallback: the submit was rejected because the previous period isn't approved.
+        if (isPrevApprovalBlocked()) {
+          return handleTermBlocked(sub, monthMinus(sub.targetMonth, 1), 'pending');
+        }
+        // ⚠ Confirm page is provisional until verified live.
+        const confirmBtn = findTermConfirmButton();
+        if (confirmBtn) {
+          sendProgress(`${labelOf(sub)}：申請内容を確定中...`, submitPercent(sub, 92));
+          await updateSubmit(sub, { phase: 'submit-success' });
+          activateElement(confirmBtn);
+          return;
+        }
+        const next = await updateSubmit(sub, { phase: 'submit-success' });
+        return runSubmitStateMachine(next);
+      }
+
+      case 'submit-success': {
+        // ⚠ Success detection is provisional until verified live.
+        if (detectTermSubmissionSuccess(sub.targetMonth)) {
+          return advanceSubmitQueue(sub, true, false);
+        }
+        sendProgress(`${labelOf(sub)}：申請結果を確認中...`, submitPercent(sub, 95));
+        await updateSubmit(sub, { phase: 'submit-success-wait' });
+        return;
+      }
+
+      case 'submit-success-wait': {
+        return advanceSubmitQueue(sub, true, false);
+      }
+
+      default:
+        clearSubmit();
+    }
+  } catch (err) {
+    console.error('[HR Term Submit] Error:', err);
+    chrome.storage.session.remove('hrSubmitState');
+    chrome.storage.session.remove('hrAutoState');
+    sendError(err.message);
+  }
+}
+
 // ── Message Handler ───────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'PAGE_CHECK') {
@@ -786,9 +1274,46 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'PREPARE_TERM_PAGE') {
+    prepareTermPage()
+      .then(result => sendResponse(result))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+
+  if (msg.type === 'SCAN_TERM_STATUS_STEP') {
+    termScanStep()
+      .then(result => sendResponse(result))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+
+  if (msg.type === 'START_TERM_SUBMIT') {
+    shouldStop = false;
+    const queue = msg.queue || [];
+    const sub = {
+      queue,
+      queueIndex: 0,
+      targetMonth: queue[0] || null,
+      phase: 'submit-nav',
+      config: msg.config,
+      workdaysByMonth: msg.workdaysByMonth || {},
+      navStep: null,
+    };
+    chrome.storage.session.set({ hrSubmitState: sub });
+    if (sub.targetMonth) {
+      sendProgress(`${formatMonthLabel(sub.targetMonth)} の月次申請を開始します...`, 2);
+    }
+    runStateMachine();
+    sendResponse({ ok: true });
+    return;
+  }
+
   if (msg.type === 'STOP') {
     shouldStop = true;
     chrome.storage.session.remove('hrAutoState');
+    chrome.storage.session.remove('hrSubmitState');
+    chrome.storage.session.remove('hrTermScan');
     chrome.storage.session.remove('hrAutoProgress');
     sendResponse({ ok: true });
     return;
