@@ -775,10 +775,11 @@ async function scanWorkdaysForMonth(monthKey) {
 // Reaches the 勤務表 page, reads which past months still need 月次申請, and — after
 // the existing engine fills any missing 平日 hours — submits via the 月次申請 button.
 //
-// SAFETY: TERM_SUBMIT_DRY_RUN gates the irreversible 月次申請 click. While true, the
-// whole flow runs end-to-end but stops just before clicking 月次申請 (logs instead).
-// Flip to false only after the confirm/success pages are verified on the live site.
-const TERM_SUBMIT_DRY_RUN = true;
+// TERM_SUBMIT_DRY_RUN gates the irreversible 月次申請 click. When true, the whole flow
+// runs end-to-end but stops just before clicking 月次申請 (logs instead). Now LIVE
+// (false): #BTNSBMT0 → confirm page → #btnExec0「確定」 are clicked for real.
+// Success is detected by the target month becoming non-submittable after commit.
+const TERM_SUBMIT_DRY_RUN = false;
 const MAX_TERM_LOOKBACK = 12;
 
 // 勤務表 navigation works by link text (confirmed on the live site).
