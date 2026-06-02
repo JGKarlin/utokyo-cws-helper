@@ -281,6 +281,9 @@
   <!-- Automation UI -->
   <div id="automationUI" style="display:none">
 
+    <!-- Manual hours-entry block — hidden when 毎月自動で申請する is on -->
+    <div id="manualEntrySection">
+
     <!-- Mode -->
     <div class="card">
       <div class="card-label">出退勤設定</div>
@@ -358,8 +361,10 @@
       <div class="date-hint">平日のみ対象</div>
     </div>
 
+    </div><!-- /manualEntrySection -->
+
     <!-- Buttons -->
-    <div class="btn-group">
+    <div class="btn-group" id="btnGroup">
       <button class="btn btn-start" id="btnStart">▶ 入力開始</button>
       <button class="btn btn-stop" id="btnStop">■ 停止</button>
     </div>

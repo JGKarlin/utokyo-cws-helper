@@ -314,9 +314,26 @@ function clearMessages() {
   document.getElementById('successBox').style.display = 'none';
 }
 
+let isRunning = false;
 function setRunning(running) {
-  document.getElementById('btnStart').style.display = running ? 'none' : 'flex';
+  isRunning = running;
+  const auto = !!document.getElementById('autoSubmitToggle').checked;
+  // 入力開始 is a manual-entry action — hidden when fully automatic; 停止 only while running.
+  document.getElementById('btnStart').style.display = (running || auto) ? 'none' : 'flex';
   document.getElementById('btnStop').style.display  = running ? 'flex' : 'none';
+  // Collapse the (now empty) button row when fully automatic and idle.
+  const group = document.getElementById('btnGroup');
+  if (group) group.style.display = (running || !auto) ? '' : 'none';
+}
+
+// When 毎月自動で申請する is on, the manual hours-entry controls (出退勤設定・時刻範囲・
+// 対象期間・入力開始) are irrelevant and just clutter the panel — hide them. They return
+// the moment the box is unchecked.
+function applyAutoSubmitUI() {
+  const sec = document.getElementById('manualEntrySection');
+  const auto = !!document.getElementById('autoSubmitToggle').checked;
+  if (sec) sec.style.display = auto ? 'none' : 'block';
+  setRunning(isRunning); // re-apply button visibility for the new mode
 }
 
 function updateProgress(text, percent) {
@@ -794,6 +811,7 @@ const TERM_AUTO_KEY = 'hrAutoSubmitEnabled';
   document.getElementById('termCard').style.display = 'block';
   const stored = (await chrome.storage.local.get(TERM_AUTO_KEY))[TERM_AUTO_KEY];
   el.checked = !!stored;
+  applyAutoSubmitUI();
   el.addEventListener('change', async () => {
     if (el.checked) {
       const ok = window.confirm(
@@ -801,11 +819,12 @@ const TERM_AUTO_KEY = 'hrAutoSubmitEnabled';
         '必要な勤務時間を自動入力し、前月の承認を待って自動的に申請します（月次申請は取り消せません）。\n\n' +
         '有効にしますか？'
       );
-      if (!ok) { el.checked = false; return; }
+      if (!ok) { el.checked = false; applyAutoSubmitUI(); return; }
       await chrome.storage.local.set({ [TERM_AUTO_KEY]: true });
     } else {
       await chrome.storage.local.set({ [TERM_AUTO_KEY]: false });
     }
+    applyAutoSubmitUI();
     try { chrome.runtime.sendMessage({ type: 'AUTO_SUBMIT_SCHEDULE' }); } catch (_) {}
   });
 })();
