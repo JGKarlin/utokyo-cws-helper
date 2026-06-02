@@ -634,19 +634,38 @@ function renderTermSection(cache, pending, failMsg) {
       (m.approval === 'none' || m.approval === 'returned' || !m.approval))
     .sort((a, b) => (a.month < b.month ? 1 : -1)); // newest first
 
-  let shown = false;
+  // Submitted but not yet 最終承認 → positive confirmation (recent months only). Covers
+  // both the plugin path (submitted:true) and a manual/observed submit (approval pending,
+  // no longer submittable).
+  const submitted = Object.values(months)
+    .filter(m => m && m.month && m.month < current && m.month >= termMonthMinus(current, 2) &&
+      (m.submitted === true || (m.approval === 'pending' && !m.submittable)))
+    .sort((a, b) => (a.month < b.month ? 1 : -1));
+
+  let shownButton = false;
+  let shownAny = false;
 
   if (pending && pending.targetMonth) {
-    shown = true;
+    shownAny = true;
     const div = document.createElement('div');
     div.className = 'term-item term-blocked';
     div.innerHTML = `<span class="term-month">${formatTermLabel(pending.targetMonth)}</span>：前月（${formatTermLabel(pending.prevMonth)}）の承認待ち。承認後に自動申請します。`;
     list.appendChild(div);
   }
 
+  for (const m of submitted) {
+    shownAny = true;
+    const div = document.createElement('div');
+    div.className = 'term-item term-done';
+    div.innerHTML = `<span class="term-done-check">✓</span> <span class="term-month">${formatTermLabel(m.month)}</span>分の勤務実績を提出しました（承認待ち）。`;
+    list.appendChild(div);
+  }
+
   for (const m of candidates) {
     if (pending && pending.targetMonth === m.month) continue;
-    shown = true;
+    if (submitted.some(s => s.month === m.month)) continue;
+    shownAny = true;
+    shownButton = true;
     const wrap = document.createElement('div');
     wrap.className = 'term-item';
 
@@ -667,12 +686,14 @@ function renderTermSection(cache, pending, failMsg) {
   }
 
   card.style.display = 'block';
-  if (shown) {
+  if (shownButton) {
     status.style.display = 'none';
     const hint = document.createElement('div');
     hint.className = 'term-hint';
     hint.textContent = '※月次申請は取り消せません。';
     list.appendChild(hint);
+  } else if (shownAny) {
+    status.style.display = 'none';
   } else if (failMsg) {
     status.style.display = 'block';
     status.textContent = failMsg;
@@ -684,6 +705,16 @@ function renderTermSection(cache, pending, failMsg) {
   // Refresh the toolbar badge / one-time notification from the latest status.
   try { chrome.runtime.sendMessage({ type: 'TERM_STATUS_REFRESHED' }); } catch (_) {}
 }
+
+// Live-update the term card when the status cache / pending record changes (e.g. a
+// submission completes) so it reflects "提出しました" without the panel being reopened.
+chrome.storage.onChanged.addListener(async (changes, area) => {
+  if (area !== 'local') return;
+  if (!changes[TERM_CACHE_KEY] && !changes.hrPendingSubmit) return;
+  const cache = (await chrome.storage.local.get(TERM_CACHE_KEY))[TERM_CACHE_KEY];
+  const { hrPendingSubmit } = await chrome.storage.local.get('hrPendingSubmit');
+  renderTermSection(cache, hrPendingSubmit);
+});
 
 async function startTermSubmission(queue) {
   const labels = queue.map(formatTermLabel).join('、');

@@ -1088,12 +1088,15 @@ function findTermConfirmButton() {
   }
   return findSubmitButton(document);
 }
+// Post-commit success page VERIFIED (2026-06-02): the 勤務表 reloads with a <marquee>
+// reading 「{期間}の勤務実績を提出しました。」 and the 月次申請 button gone. Either the
+// 提出しました text or the month becoming non-submittable confirms the commit.
 function detectTermSubmissionSuccess(month) {
   if (isTermConfirmPage()) return false; // still on the confirm page → not committed yet
-  // Back on the 勤務表 for that month and no longer submittable ⟺ it is now submitted.
-  if (isTermPage() && readDisplayedTermMonth() === month && !isMonthSubmittable()) return true;
   const txt = getAccessibleDocuments().map(d => normalizeNavText(d.body ? d.body.textContent : '')).join('');
-  return /申請しました|受け付けました|申請を受付|正常に処理|提出しました/.test(txt);
+  if (/勤務実績を提出しました|提出しました|申請しました|受け付けました|申請を受付|正常に処理/.test(txt)) return true;
+  // Fallback: back on the 勤務表 for that month and no longer submittable ⟺ submitted.
+  return isTermPage() && readDisplayedTermMonth() === month && !isMonthSubmittable();
 }
 async function markTermSubmitted(month) {
   try {
