@@ -573,7 +573,9 @@ async function discoverTermStatus(isOnDomain) {
   const fresh = cache && cache.currentMonth === thisCalendarMonthKey() &&
     cache.scannedAt && (Date.now() - cache.scannedAt) < TERM_CACHE_TTL_MS;
 
-  if (fresh || !isOnDomain) {
+  // When a submission is pending (blocked on the previous month's approval), don't trust
+  // a fresh cache — re-scan so a since-granted 最終承認 is picked up and the block lifts.
+  if ((fresh && !hrPendingSubmit) || !isOnDomain) {
     renderTermSection(cache, hrPendingSubmit);
     return;
   }
@@ -614,6 +616,19 @@ function renderTermSection(cache, pending, failMsg) {
 
   const current = (cache && cache.currentMonth) || thisCalendarMonthKey();
   const months = (cache && cache.months) || {};
+
+  // Self-heal a stale block: if the pending month's previous month is now 最終承認 (per
+  // the fresh scan), the dependency is satisfied — drop the stale pending record and let
+  // the month render as a normal submittable candidate instead of the "承認待ち" banner.
+  if (pending && pending.targetMonth && pending.prevMonth) {
+    const prevApproval = (months[pending.prevMonth] || {}).approval;
+    if (prevApproval === 'approved') {
+      chrome.storage.local.remove('hrPendingSubmit');
+      try { chrome.runtime.sendMessage({ type: 'TERM_CLEAR_RETRY' }); } catch (_) {}
+      pending = null;
+    }
+  }
+
   const candidates = Object.values(months)
     .filter(m => m.submittable && m.month < current &&
       (m.approval === 'none' || m.approval === 'returned' || !m.approval))
@@ -665,6 +680,9 @@ function renderTermSection(cache, pending, failMsg) {
     status.style.display = 'block';
     status.textContent = '未提出の月はありません。';
   }
+
+  // Refresh the toolbar badge / one-time notification from the latest status.
+  try { chrome.runtime.sendMessage({ type: 'TERM_STATUS_REFRESHED' }); } catch (_) {}
 }
 
 async function startTermSubmission(queue) {
@@ -761,9 +779,54 @@ const TERM_AUTO_KEY = 'hrAutoSubmitEnabled';
   });
 })();
 
+// ── Auto-prompt on detect (paired with the manual button) ─────────────────────
+const TERM_PROMPTED_KEY = 'hrAutoPromptedMonths';
+
+// Same "ready for manual submission" rule the background uses for the toolbar badge.
+function computeReadyMonths(cache, pendingMonth) {
+  const months = (cache && cache.months) || {};
+  const current = (cache && cache.currentMonth) || thisCalendarMonthKey();
+  const ready = [];
+  for (const m of Object.values(months)) {
+    if (!m || !m.month) continue;
+    if (!m.submittable) continue;
+    if (!(m.month < current)) continue;
+    if (!(m.approval === 'none' || m.approval === 'returned' || !m.approval)) continue;
+    if (pendingMonth && pendingMonth === m.month) continue;
+    const prev = months[termMonthMinus(m.month, 1)];
+    if (!prev || prev.approval !== 'approved') continue;
+    ready.push(m.month);
+  }
+  return ready.sort();
+}
+
+// When the panel opens and a month is ready, pop the confirm dialog automatically —
+// but only when 毎月自動で申請する is OFF (else the background submits silently and a
+// prompt would just race it), only on the CWS domain, and at most once per month (the
+// button stays available for any later run).
+async function maybeAutoPromptManual(isOnDomain) {
+  if (!isOnDomain) return;
+  try {
+    const prog = (await chrome.storage.session.get('hrAutoProgress')).hrAutoProgress;
+    if (prog && prog.running) return; // a run is already in progress
+    const enabled = (await chrome.storage.local.get(TERM_AUTO_KEY))[TERM_AUTO_KEY];
+    if (enabled) return;
+    const cache = (await chrome.storage.local.get(TERM_CACHE_KEY))[TERM_CACHE_KEY];
+    const { hrPendingSubmit } = await chrome.storage.local.get('hrPendingSubmit');
+    const ready = computeReadyMonths(cache, hrPendingSubmit && hrPendingSubmit.targetMonth);
+    if (!ready.length) return;
+    const prompted = (await chrome.storage.local.get(TERM_PROMPTED_KEY))[TERM_PROMPTED_KEY] || [];
+    const target = ready.find(mo => !prompted.includes(mo));
+    if (!target) return;
+    await chrome.storage.local.set({ [TERM_PROMPTED_KEY]: [...prompted, target] });
+    startTermSubmission([target]); // shows the one confirm dialog, then runs automatically
+  } catch (_) {}
+}
+
 // Kick off discovery on popup open (scan only when on the CWS domain / logged in).
 (async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const onDomain = !!(tab && tab.url && tab.url.includes('ut-ppsweb.adm.u-tokyo.ac.jp'));
-  discoverTermStatus(onDomain);
+  await discoverTermStatus(onDomain);
+  maybeAutoPromptManual(onDomain);
 })();

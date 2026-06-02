@@ -11,23 +11,43 @@ const MATRIX_INPUT_LINK_SELECTOR = 'body > table:nth-child(11) > tbody > tr > td
 const MATRIX_INPUT_LINK_HREF = 'cws?@SID=null&@SUB=root.cws.shuro.personal.wp.matrixinput&@SN=root.cws.shuro.personal.wp.matrixinput&@FN=FORM_WP_PERSONAL';
 
 // ── Communication ─────────────────────────────────────────────────────────────
+// True only while this content script's extension context is still valid. After the
+// extension is reloaded/updated, the already-injected script keeps running but its
+// chrome.* bridge is severed — any chrome call then throws "Extension context
+// invalidated". Guarding on this lets the orphaned instance bail quietly instead of
+// spraying uncaught errors (it can do nothing useful until the page is reloaded).
+function extensionAlive() {
+  try { return !!(chrome.runtime && chrome.runtime.id); } catch (_) { return false; }
+}
+
+// Fire-and-forget session-storage writes that must never throw on a dead context
+// (synchronous throw and async rejection are both swallowed).
+function safeSessionSet(obj) {
+  if (!extensionAlive()) return;
+  try { const p = chrome.storage.session.set(obj); if (p && p.catch) p.catch(() => {}); } catch (_) {}
+}
+function safeSessionRemove(keys) {
+  if (!extensionAlive()) return;
+  try { const p = chrome.storage.session.remove(keys); if (p && p.catch) p.catch(() => {}); } catch (_) {}
+}
+
 function sendToPopup(msg) {
   try { chrome.runtime.sendMessage(msg); } catch {}
 }
 
 function sendProgress(text, percent) {
   sendToPopup({ type: 'PROGRESS', text, percent });
-  chrome.storage.session.set({ hrAutoProgress: { running: true, text, percent } });
+  safeSessionSet({ hrAutoProgress: { running: true, text, percent } });
 }
 
 function sendDone(text) {
   sendToPopup({ type: 'DONE', text });
-  chrome.storage.session.set({ hrAutoProgress: { running: false, done: true, text } });
+  safeSessionSet({ hrAutoProgress: { running: false, done: true, text } });
 }
 
 function sendError(message) {
   sendToPopup({ type: 'ERROR', message });
-  chrome.storage.session.set({ hrAutoProgress: { running: false, error: true, message } });
+  safeSessionSet({ hrAutoProgress: { running: false, error: true, message } });
 }
 
 // Ask the background service worker to raise an OS/desktop notification (works even
@@ -325,6 +345,7 @@ function advanceState(state) {
 // (after 送信 completes) to keep progress text accurate on confirm/success.
 
 async function runStateMachine() {
+  if (!extensionAlive()) return; // orphaned after an extension reload — do nothing
   let result;
   try {
     result = await chrome.storage.session.get(['hrAutoState', 'hrScanActive', 'hrSubmitState']);
@@ -354,7 +375,7 @@ async function runStateMachine() {
   await delay(1200);
 
   if (shouldStop) {
-    chrome.storage.session.remove('hrAutoState');
+    safeSessionRemove('hrAutoState');
     return;
   }
 
@@ -388,12 +409,12 @@ async function runStateMachine() {
         // Current entry is done. Advance state.
         const nextState = advanceState(state);
         if (nextState) {
-          chrome.storage.session.set({ hrAutoState: nextState });
+          safeSessionSet({ hrAutoState: nextState });
           sendProgress(progressText(nextState), calcProgress(nextState));
           clickReturnLink();
         } else {
           // All entries complete
-          chrome.storage.session.remove('hrAutoState');
+          safeSessionRemove('hrAutoState');
           sendDone(`${state.dates.length}勤務日の自己申告記録（出勤・退勤）の登録が完了しました（${state.dates.length * 2}件）。`);
         }
         break;
@@ -414,7 +435,7 @@ async function runStateMachine() {
     }
   } catch (err) {
     console.error('[HR Auto-Fill] Error:', err);
-    chrome.storage.session.remove('hrAutoState');
+    safeSessionRemove('hrAutoState');
     sendError(err.message);
   }
 }
@@ -941,6 +962,38 @@ function isPrevApprovalBlocked() {
   return normalizeDigits(form.textContent || '').indexOf('最終承認されていないため送信できません') !== -1;
 }
 
+// The 勤務表 shows 「{前期間}の勤務実績は、最終承認されています。」 when the previous month
+// is approved — a passive, same-page confirmation that this month is unblocked.
+function isPrevApprovedOnTermPage() {
+  const form = getTermForm();
+  if (!form) return false;
+  return normalizeDigits(form.textContent || '').indexOf('最終承認されています') !== -1;
+}
+
+// Passively report the 勤務表's submit-readiness to the background so the toolbar badge
+// and the one-time "ready" notification work even with the side panel closed. Read-only,
+// and skipped while any automation/scan is running so it never interferes.
+async function reportTermObservation() {
+  if (!extensionAlive() || !isTermPage()) return;
+  let st;
+  try { st = await chrome.storage.session.get(['hrSubmitState', 'hrAutoState', 'hrScanActive']); }
+  catch { return; }
+  if (st.hrSubmitState || st.hrAutoState || st.hrScanActive) return;
+  const month = readDisplayedTermMonth();
+  if (!month) return;
+  try {
+    chrome.runtime.sendMessage({
+      type: 'TERM_OBSERVED',
+      month,
+      label: formatMonthLabel(month),
+      submittable: isMonthSubmittable(),
+      approval: readTermApprovalStatus(),
+      prevMonth: monthMinus(month, 1),
+      prevApproved: isPrevApprovedOnTermPage(),
+    });
+  } catch (_) {}
+}
+
 // Navigate toward the 勤務表: メインメニュー → 就労管理(text) → 勤務表(text).
 // Returns the popup-poll shape: { ready } | { navigating, step, waitMs }.
 async function prepareTermPage() {
@@ -993,9 +1046,9 @@ async function updateSubmit(sub, patch) {
   return next;
 }
 function clearSubmit() {
-  chrome.storage.session.remove('hrSubmitState');
-  chrome.storage.session.remove('hrAutoState');
-  chrome.storage.session.remove('hrTermScan');
+  safeSessionRemove('hrSubmitState');
+  safeSessionRemove('hrAutoState');
+  safeSessionRemove('hrTermScan');
 }
 
 // Stop a submission. In unattended auto mode an expected no-op (e.g. the month is
@@ -1003,7 +1056,7 @@ function clearSubmit() {
 function abortSubmit(sub, message) {
   clearSubmit();
   if (sub && sub.auto) {
-    chrome.storage.session.remove('hrAutoProgress');
+    safeSessionRemove('hrAutoProgress');
     return;
   }
   sendError(message);
@@ -1058,6 +1111,8 @@ async function markTermSubmitted(month) {
       chrome.runtime.sendMessage({ type: 'TERM_CLEAR_RETRY' });
     }
   } catch (_) {}
+  // The month is no longer "ready" — refresh the toolbar badge / notification state.
+  try { chrome.runtime.sendMessage({ type: 'TERM_READY_RECOMPUTE' }); } catch (_) {}
 }
 // Previous period not finally approved → can't submit yet. Persist a pending record
 // (storage.local), ask the background to schedule the daily retry + notify, and stop.
@@ -1075,8 +1130,8 @@ async function handleTermBlocked(sub, prevMonth, prevApproval) {
     since: Date.now(), notified: true,
   };
   try { await chrome.storage.local.set({ hrPendingSubmit: pending }); } catch (_) {}
-  chrome.storage.session.remove('hrSubmitState');
-  chrome.storage.session.remove('hrAutoState');
+  safeSessionRemove('hrSubmitState');
+  safeSessionRemove('hrAutoState');
   try { chrome.runtime.sendMessage({ type: 'TERM_SCHEDULE_RETRY' }); } catch (_) {}
   if (!alreadyNotified) {
     notify('月次申請を保留しました', `${formatMonthLabel(sub.targetMonth)} は前月（${formatMonthLabel(prevMonth)}）の最終承認待ちのため申請できません。承認され次第、毎日自動で確認して申請します。`);
@@ -1093,8 +1148,8 @@ async function advanceSubmitQueue(sub, submitted, dryRun) {
     sendProgress(`次の対象月（${formatMonthLabel(nextMonth)}）を処理します...`, submitPercent(next, 0));
     return runSubmitStateMachine(next);
   }
-  chrome.storage.session.remove('hrSubmitState');
-  chrome.storage.session.remove('hrAutoState');
+  safeSessionRemove('hrSubmitState');
+  safeSessionRemove('hrAutoState');
   const n = sub.queue.length;
   if (dryRun) {
     sendDone(`（テスト実行）${n}件の月次申請を申請直前まで確認しました。実際の送信は行っていません。`);
@@ -1305,8 +1360,8 @@ async function runSubmitStateMachine(sub) {
     }
   } catch (err) {
     console.error('[HR Term Submit] Error:', err);
-    chrome.storage.session.remove('hrSubmitState');
-    chrome.storage.session.remove('hrAutoState');
+    safeSessionRemove('hrSubmitState');
+    safeSessionRemove('hrAutoState');
     sendError(err.message);
   }
 }
@@ -1413,3 +1468,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 // ── Auto-resume on page load ──────────────────────────────────────────────────
 runStateMachine();
+
+// Passive readiness signal for the toolbar badge / one-time notification (read-only,
+// independent of the state machine; self-skips off the 勤務表 and during automation).
+setTimeout(() => { reportTermObservation(); }, 1500);
+
+// This content script only runs on CWS pages (login lives on a different host), so
+// reaching here means the session is valid. Tell the background in case a background
+// submission was paused waiting for the user to log in.
+if (extensionAlive()) { try { chrome.runtime.sendMessage({ type: 'CWS_READY' }); } catch (_) {} }
