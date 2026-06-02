@@ -1008,22 +1008,38 @@ function abortSubmit(sub, message) {
   sendError(message);
 }
 // Provisional — confirm/success pages not yet verified live (only used when not DRY_RUN).
+// The 月次申請 confirmation page = form `FormConfirmPersonalTermSubmission` + `#btnExec0`「確定」.
+function isTermConfirmPage() {
+  for (const doc of getAccessibleDocuments()) {
+    try {
+      if (doc.forms && doc.forms['FormConfirmPersonalTermSubmission']) return true;
+      if (doc.getElementById('btnExec0')) return true;
+    } catch (_) {}
+  }
+  return false;
+}
 function findTermConfirmButton() {
-  // A successful 月次申請 shows a 確認 (confirmation) button on the next page; clicking
-  // it commits. (No password / 再認証 is required for 勤務表 submission.)
+  // Confirm page commits via `#btnExec0`「確定」(onclick → ExecutePersonalTermSubmissionAction).
+  // No password / 再認証 is required. (Button id/form known from the page; the post-commit
+  // success page is the only piece still unobserved.)
+  const exact = getTermEl('btnExec0');
+  if (exact && !exact.disabled) return exact;
   for (const doc of getAccessibleDocuments()) {
     const cand = Array.from(doc.querySelectorAll('input[type="button"],input[type="submit"],button')).find(b => {
       const v = normalizeNavText(b.value || b.textContent || '');
-      return /確認|確定|送信|申請する|はい|OK/.test(v) && v.indexOf('月次申請前') === -1 && v !== '月次申請';
+      return /確定|確認|送信|申請する|はい|OK/.test(v) &&
+        v.indexOf('戻') === -1 && v.indexOf('月次申請前') === -1 && v !== '月次申請';
     });
     if (cand) return cand;
   }
   return findSubmitButton(document);
 }
 function detectTermSubmissionSuccess(month) {
+  if (isTermConfirmPage()) return false; // still on the confirm page → not committed yet
+  // Back on the 勤務表 for that month and no longer submittable ⟺ it is now submitted.
   if (isTermPage() && readDisplayedTermMonth() === month && !isMonthSubmittable()) return true;
   const txt = getAccessibleDocuments().map(d => normalizeNavText(d.body ? d.body.textContent : '')).join('');
-  return /申請しました|受け付けました|申請を受付|正常に処理/.test(txt);
+  return /申請しました|受け付けました|申請を受付|正常に処理|提出しました/.test(txt);
 }
 async function markTermSubmitted(month) {
   try {
@@ -1245,24 +1261,27 @@ async function runSubmitStateMachine(sub) {
       }
 
       case 'submit-confirm': {
-        // Fallback: the submit was rejected because the previous period isn't approved.
+        // Blocked? (clicking 月次申請 reloaded the 勤務表 with the rejection <strong>)
         if (isPrevApprovalBlocked()) {
           return handleTermBlocked(sub, monthMinus(sub.targetMonth, 1), 'pending');
         }
-        // ⚠ Confirm page is provisional until verified live.
-        const confirmBtn = findTermConfirmButton();
-        if (confirmBtn) {
-          sendProgress(`${labelOf(sub)}：申請内容を確定中...`, submitPercent(sub, 92));
-          await updateSubmit(sub, { phase: 'submit-success' });
-          activateElement(confirmBtn);
-          return;
+        // Confirm page → click 確定 (#btnExec0) to commit.
+        if (isTermConfirmPage()) {
+          const confirmBtn = findTermConfirmButton();
+          if (confirmBtn) {
+            sendProgress(`${labelOf(sub)}：申請内容を確定中...`, submitPercent(sub, 92));
+            await updateSubmit(sub, { phase: 'submit-success' });
+            activateElement(confirmBtn); // → ExecutePersonalTermSubmissionAction → commit (full reload)
+            return;
+          }
         }
+        // Otherwise it may already be committed, or the page is still settling — re-check as success.
         const next = await updateSubmit(sub, { phase: 'submit-success' });
         return runSubmitStateMachine(next);
       }
 
       case 'submit-success': {
-        // ⚠ Success detection is provisional until verified live.
+        // ⚠ Success page DOM not yet observed; detection keys on the month becoming non-submittable.
         if (detectTermSubmissionSuccess(sub.targetMonth)) {
           return advanceSubmitQueue(sub, true, false);
         }
@@ -1272,7 +1291,12 @@ async function runSubmitStateMachine(sub) {
       }
 
       case 'submit-success-wait': {
-        return advanceSubmitQueue(sub, true, false);
+        if (detectTermSubmissionSuccess(sub.targetMonth)) {
+          return advanceSubmitQueue(sub, true, false);
+        }
+        // Don't claim a success we can't confirm.
+        sendError(`${labelOf(sub)} の申請結果を確認できませんでした。勤務表でご確認ください。`);
+        return clearSubmit();
       }
 
       default:
