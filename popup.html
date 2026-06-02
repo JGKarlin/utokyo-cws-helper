@@ -263,7 +263,7 @@
 
   <!-- 月次申請 (monthly report submission) -->
   <div class="card" id="termCard">
-    <div class="card-label">月次申請</div>
+    <div class="card-label">勤務表の提出（月次申請）</div>
     <label class="term-toggle" for="autoSubmitToggle">
       <input type="checkbox" id="autoSubmitToggle">
       <span>毎月自動で申請する</span>
@@ -281,9 +281,9 @@
   <!-- Automation UI -->
   <div id="automationUI" style="display:none">
 
-    <!-- Manual hours-entry block — hidden when 毎月自動で申請する is on -->
-    <div id="manualEntrySection">
-
+    <!-- 出退勤設定 + 時刻範囲: the times used to fill 出勤/退勤 — for both 入力開始 and the
+         月次申請 submission. Kept visible even in auto mode so the submission time range
+         stays configurable. -->
     <!-- Mode -->
     <div class="card">
       <div class="card-label">出退勤設定</div>
@@ -297,6 +297,7 @@
           <label for="modeManual"><span class="radio-dot"></span>手動</label>
         </div>
       </div>
+      <div class="date-hint">入力する出退勤時刻（手動入力・月次申請の両方に使用）</div>
     </div>
 
     <!-- Manual time settings -->
@@ -344,8 +345,8 @@
       </div>
     </div>
 
-    <!-- Date range -->
-    <div class="card">
+    <!-- 対象期間 is only for the standalone 入力開始 — hidden when 毎月自動で申請する is on -->
+    <div class="card" id="manualEntrySection">
       <div class="card-label">対象期間</div>
       <div class="date-range-row">
         <div class="date-field">
@@ -360,8 +361,6 @@
       </div>
       <div class="date-hint">平日のみ対象</div>
     </div>
-
-    </div><!-- /manualEntrySection -->
 
     <!-- Buttons -->
     <div class="btn-group" id="btnGroup">

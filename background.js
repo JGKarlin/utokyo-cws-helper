@@ -61,6 +61,18 @@ const DEFAULT_TERM_CONFIG = {
   departRange: { earlyH: 17, earlyM: 0, lateH: 19, lateM: 0 },
 };
 
+// The time range the automatic submission fills hours with — the user's saved 出退勤設定
+// (hrTermTimeConfig, set from the side panel) if present, otherwise the built-in defaults.
+async function getTermConfig() {
+  try {
+    const cfg = (await chrome.storage.local.get('hrTermTimeConfig')).hrTermTimeConfig;
+    if (cfg && cfg.arriveRange && cfg.departRange) {
+      return { arriveRange: cfg.arriveRange, departRange: cfg.departRange };
+    }
+  } catch (_) {}
+  return DEFAULT_TERM_CONFIG;
+}
+
 function prevMonthKey() {
   const d = new Date();
   let y = d.getFullYear();
@@ -277,7 +289,7 @@ async function runPendingRetry() {
     queueIndex: 0,
     targetMonth: hrPendingSubmit.targetMonth,
     phase: 'submit-nav',
-    config: hrPendingSubmit.config || DEFAULT_TERM_CONFIG,
+    config: hrPendingSubmit.config || (await getTermConfig()),
     workdaysByMonth: hrPendingSubmit.workdaysByMonth || {},
     navStep: null,
     auto: true,
@@ -296,7 +308,7 @@ async function runAutoSubmitCheck() {
   if (cached && cached.submitted) return;
   await driveSubmitInBackgroundTab({
     queue: [target], queueIndex: 0, targetMonth: target, phase: 'submit-nav',
-    config: DEFAULT_TERM_CONFIG, workdaysByMonth: {}, navStep: null, auto: true,
+    config: await getTermConfig(), workdaysByMonth: {}, navStep: null, auto: true,
   });
 }
 

@@ -250,20 +250,33 @@ async function getWorkdays(startDate, endDate, updateProgressFn) {
   return dates.sort();
 }
 
-// ── Page detection on popup open ─────────────────────────────────────────────
+// ── Page detection (live: re-checks when you switch / navigate tabs) ──────────
+async function refreshOnDomainUI() {
+  let url = '';
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    url = (tab && tab.url) || '';
+  } catch (_) {}
+  const onDomain = url.includes('ut-ppsweb.adm.u-tokyo.ac.jp');
+  const auto = document.getElementById('automationUI');
+  const off = document.getElementById('notOnDomain');
+  if (auto) auto.style.display = onDomain ? 'block' : 'none';
+  if (off) off.style.display = onDomain ? 'none' : 'block';
+}
+
 (async () => {
   setDefaultDates();
-
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const url = tab ? (tab.url || '') : '';
-  const isOnDomain = url.includes('ut-ppsweb.adm.u-tokyo.ac.jp');
-
-  if (isOnDomain) {
-    document.getElementById('automationUI').style.display = 'block';
-  } else {
-    document.getElementById('notOnDomain').style.display = 'block';
-  }
+  await restoreTermTimeConfig(); // show the saved 出退勤 time range (also used by 月次申請)
+  await refreshOnDomainUI();
 })();
+
+// The side panel stays open across tab switches/navigations, so re-check the on-domain
+// state live — the manual UI then appears/disappears as you move on/off a CWS page,
+// instead of being frozen to whatever tab was active when the panel opened.
+chrome.tabs.onActivated.addListener(() => { refreshOnDomainUI(); });
+chrome.tabs.onUpdated.addListener((_id, changeInfo, tab) => {
+  if (tab && tab.active && (changeInfo.url || changeInfo.status === 'complete')) refreshOnDomainUI();
+});
 
 // ── Open system link ─────────────────────────────────────────────────────────
 document.getElementById('btnOpenSystem').addEventListener('click', async (e) => {
@@ -278,6 +291,7 @@ document.querySelectorAll('input[name="mode"]').forEach(radio => {
   radio.addEventListener('change', () => {
     const isManual = document.getElementById('modeManual').checked;
     document.getElementById('manualSection').style.display = isManual ? 'block' : 'none';
+    saveTermTimeConfig(); // these times also drive the 月次申請 submission
   });
 });
 
@@ -287,8 +301,63 @@ document.querySelectorAll('input[name="mode"]').forEach(radio => {
   el.addEventListener('blur', () => {
     const n = parseInt(el.value, 10);
     el.value = isNaN(n) ? '00' : String(Math.min(n, 59)).padStart(2, '0');
+    saveTermTimeConfig();
   });
 });
+// Hours persist on change (minutes persist via their blur handler above).
+['arriveEarlyH', 'arriveLatestH', 'departEarlyH', 'departLatestH'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('change', saveTermTimeConfig);
+});
+
+// ── 出勤/退勤 time config (shared by 入力開始 and the 月次申請 submission) ──────────
+const TERM_TIME_KEY = 'hrTermTimeConfig';
+const DEFAULT_ARRIVE = { earlyH: 8, earlyM: 45, lateH: 10, lateM: 0 };
+const DEFAULT_DEPART = { earlyH: 17, earlyM: 0, lateH: 19, lateM: 0 };
+
+// Read the time config from the UI. Throws on an invalid manual range (via validateRange).
+function readTimeConfigFromUI() {
+  const manual = document.getElementById('modeManual').checked;
+  if (manual) {
+    const aEH = getInt('arriveEarlyH'), aEM = getInt('arriveEarlyM');
+    const aLH = getInt('arriveLatestH'), aLM = getInt('arriveLatestM');
+    const dEH = getInt('departEarlyH'),  dEM = getInt('departEarlyM');
+    const dLH = getInt('departLatestH'),  dLM = getInt('departLatestM');
+    validateRange(aEH, aEM, aLH, aLM, '出勤');
+    validateRange(dEH, dEM, dLH, dLM, '退勤');
+    return { mode: 'manual',
+      arriveRange: { earlyH: aEH, earlyM: aEM, lateH: aLH, lateM: aLM },
+      departRange: { earlyH: dEH, earlyM: dEM, lateH: dLH, lateM: dLM } };
+  }
+  return { mode: 'auto', arriveRange: { ...DEFAULT_ARRIVE }, departRange: { ...DEFAULT_DEPART } };
+}
+
+// Persist it so the automatic / background 月次申請 fills hours with the same times.
+async function saveTermTimeConfig() {
+  let cfg;
+  try { cfg = readTimeConfigFromUI(); } catch (_) { return; } // skip invalid range; keep last good
+  try { await chrome.storage.local.set({ [TERM_TIME_KEY]: cfg }); } catch (_) {}
+}
+
+// Restore the saved config into the UI on open so the displayed times match what the
+// automatic submission will use.
+async function restoreTermTimeConfig() {
+  let cfg;
+  try { cfg = (await chrome.storage.local.get(TERM_TIME_KEY))[TERM_TIME_KEY]; } catch (_) { return; }
+  if (!cfg) return;
+  const manual = cfg.mode === 'manual';
+  document.getElementById(manual ? 'modeManual' : 'modeAuto').checked = true;
+  document.getElementById('manualSection').style.display = manual ? 'block' : 'none';
+  if (manual) {
+    const a = cfg.arriveRange || DEFAULT_ARRIVE, d = cfg.departRange || DEFAULT_DEPART;
+    const pad = (n) => String(n).padStart(2, '0');
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+    set('arriveEarlyH', a.earlyH); set('arriveEarlyM', pad(a.earlyM));
+    set('arriveLatestH', a.lateH); set('arriveLatestM', pad(a.lateM));
+    set('departEarlyH', d.earlyH); set('departEarlyM', pad(d.earlyM));
+    set('departLatestH', d.lateH); set('departLatestM', pad(d.lateM));
+  }
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function getInt(id) {
@@ -358,28 +427,17 @@ document.getElementById('btnStart').addEventListener('click', async () => {
   clearMessages();
   updateProgress('キャッシュを確認中...', 0);
 
-  const mode = document.querySelector('input[name="mode"]:checked').value;
-
   let arriveRange, departRange;
-  if (mode === 'manual') {
-    const aEH = getInt('arriveEarlyH'), aEM = getInt('arriveEarlyM');
-    const aLH = getInt('arriveLatestH'), aLM = getInt('arriveLatestM');
-    const dEH = getInt('departEarlyH'),  dEM = getInt('departEarlyM');
-    const dLH = getInt('departLatestH'),  dLM = getInt('departLatestM');
-    try {
-      validateRange(aEH, aEM, aLH, aLM, '出勤');
-      validateRange(dEH, dEM, dLH, dLM, '退勤');
-    } catch (e) {
-      showError(e.message);
-      updateProgress('入力エラー', 0);
-      return;
-    }
-    arriveRange = { earlyH: aEH, earlyM: aEM, lateH: aLH, lateM: aLM };
-    departRange = { earlyH: dEH, earlyM: dEM, lateH: dLH, lateM: dLM };
-  } else {
-    arriveRange = { earlyH: 8,  earlyM: 45, lateH: 10, lateM: 0 };
-    departRange = { earlyH: 17, earlyM: 0,  lateH: 19, lateM: 0 };
+  try {
+    const cfg = readTimeConfigFromUI();
+    arriveRange = cfg.arriveRange;
+    departRange = cfg.departRange;
+  } catch (e) {
+    showError(e.message);
+    updateProgress('入力エラー', 0);
+    return;
   }
+  saveTermTimeConfig(); // keep the persisted (submission) config in sync
 
   const startDate = document.getElementById('startDate').value;
   const endDate   = document.getElementById('endDate').value;
@@ -784,11 +842,14 @@ async function startTermSubmission(queue) {
     return;
   }
 
-  // 3) Kick off the submission state machine.
+  // 3) Kick off the submission state machine (using the saved 出退勤設定 time range).
+  const tcfg = (await chrome.storage.local.get(TERM_TIME_KEY))[TERM_TIME_KEY];
+  const config = (tcfg && tcfg.arriveRange && tcfg.departRange)
+    ? { arriveRange: tcfg.arriveRange, departRange: tcfg.departRange } : DEFAULT_TERM_CONFIG;
   updateProgress(`${formatTermLabel(queue[0])} の月次申請を開始します...`, 0);
   try {
     await chrome.tabs.sendMessage(tab.id, {
-      type: 'START_TERM_SUBMIT', queue, workdaysByMonth, config: DEFAULT_TERM_CONFIG,
+      type: 'START_TERM_SUBMIT', queue, workdaysByMonth, config,
     });
   } catch {
     showError('ページを再読み込みして、もう一度試してください。');
