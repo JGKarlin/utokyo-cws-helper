@@ -423,7 +423,8 @@ function validateRange(earlyH, earlyM, lateH, lateM, label) {
 }
 
 // ── Start automation ─────────────────────────────────────────────────────────
-document.getElementById('btnStart').addEventListener('click', async () => {
+// Loops every eligible workday in the period, entering 出勤 → 退勤 → 勤務外時間数（休憩）.
+async function startEntry() {
   clearMessages();
   updateProgress('キャッシュを確認中...', 0);
 
@@ -505,7 +506,9 @@ document.getElementById('btnStart').addEventListener('click', async () => {
     setRunning(false);
     updateProgress('エラー', 0);
   }
-});
+}
+
+document.getElementById('btnStart').addEventListener('click', () => startEntry());
 
 // ── Stop automation ──────────────────────────────────────────────────────────
 document.getElementById('btnStop').addEventListener('click', async () => {

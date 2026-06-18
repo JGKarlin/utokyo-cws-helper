@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "勤務時間 自動入力",
-  "version": "2.2.3",
+  "version": "2.2.4",
   "description": "東京大学就労管理システム 自己申告記録 自動入力ツール",
   "permissions": [
     "activeTab",

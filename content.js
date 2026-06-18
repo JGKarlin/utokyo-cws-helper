@@ -116,6 +116,7 @@ function detectPage() {
 
   if (title.includes('出勤）【入力】')) return 'clockin-input';
   if (title.includes('退勤）【入力】')) return 'clockout-input';
+  if (title.includes('勤務外時間数【入力】')) return 'break-input';
   if (title.includes('【確認】')) return 'confirm';
 
   // Confirmation form is in an iframe; outer frame may have title メインメニュー.
@@ -151,8 +152,10 @@ function navigateToApplicationMenu() {
 }
 
 function clickApplicationLink(phase) {
-  const linkText = phase === 'clockin' ? '自己申告記録（出勤）' : '自己申告記録（退勤）';
-  const subId = phase === 'clockin' ? 'srw_app_gi02' : 'srw_app_gi03';
+  let linkText, subId;
+  if (phase === 'clockin')       { linkText = '自己申告記録（出勤）'; subId = 'srw_app_gi02'; }
+  else if (phase === 'clockout') { linkText = '自己申告記録（退勤）'; subId = 'srw_app_gi03'; }
+  else                           { linkText = '【裁量労働制】勤務外時間数'; subId = 'srw_app_gi07'; }
 
   const links = document.querySelectorAll('a');
   for (const link of links) {
@@ -212,6 +215,65 @@ async function fillDateAndTime(state) {
   await delay(300);
 
   // Click 次 へ submit button (value may have different spacing)
+  const submitBtn =
+    document.querySelector('input[type="submit"][value="次 へ"]') ||
+    document.querySelector('input[type="submit"][value="次　へ"]') ||
+    document.querySelector('input[type="submit"][value*="次"]');
+  if (!submitBtn) {
+    throw new Error('「次 へ」ボタンが見つかりません');
+  }
+  submitBtn.click();
+}
+
+// Random 勤務外時間数 (break) in whole minutes. Staff requires ≥45 min for any 6h+ day,
+// so a random 45–60 always satisfies it. Returns {h, m}.
+function randomBreakHM() {
+  const total = 45 + Math.floor(Math.random() * 16); // 45..60 inclusive
+  return { h: Math.floor(total / 60), m: total % 60 };
+}
+
+// Fill the 【裁量労働制】勤務外時間数【入力】 page (srw_app_gi07). One workday per
+// submission: 開始日 = 終了日 = that day, plus the break duration (gi1_62H/gi1_62M).
+// The date fields reuse the same hidden-input + span pattern as the 出勤/退勤 page.
+async function fillBreakEntry(state) {
+  const { dates, dateIndex } = state;
+  const dateStr = dates[dateIndex];
+  const [yyyy, mm, dd] = dateStr.split('-');
+
+  await delay(600);
+
+  if (document.activeElement && document.activeElement !== document.body) {
+    document.activeElement.blur();
+    await delay(200);
+  }
+
+  const setDate = (name, value, spanId) => {
+    const hidden = document.querySelector(`input[name="${name}"]`);
+    const span = document.getElementById(spanId);
+    if (hidden) hidden.value = value;
+    if (span) span.textContent = value;
+  };
+  // 開始日 and 終了日 both set to the workday (avoids spanning weekends/holidays).
+  setDate('sdate_date_yyyy', yyyy, 'sdate_date_yyyy_span');
+  setDate('sdate_date_mm', mm, 'sdate_date_mm_span');
+  setDate('sdate_date_dd', dd, 'sdate_date_dd_span');
+  setDate('edate_date_yyyy', yyyy, 'edate_date_yyyy_span');
+  setDate('edate_date_mm', mm, 'edate_date_mm_span');
+  setDate('edate_date_dd', dd, 'edate_date_dd_span');
+
+  await delay(400);
+
+  const brk = randomBreakHM();
+  const hourField = document.querySelector('input[name="gi1_62H"]');
+  const minField  = document.querySelector('input[name="gi1_62M"]');
+  if (!hourField || !minField) {
+    throw new Error('勤務外時間数の入力フィールドが見つかりません');
+  }
+  setFieldValue(hourField, String(brk.h));
+  setFieldValue(minField, pad2(brk.m));
+
+  await delay(300);
+
   const submitBtn =
     document.querySelector('input[type="submit"][value="次 へ"]') ||
     document.querySelector('input[type="submit"][value="次　へ"]') ||
@@ -306,17 +368,24 @@ function clickReturnLink() {
 }
 
 // ── Progress Calculation ──────────────────────────────────────────────────────
+// Each workday is 3 entries: 出勤 → 退勤 → 勤務外時間数（休憩）.
+const ENTRIES_PER_DAY = 3;
+function phaseOffset(state) {
+  return state.phase === 'clockin' ? 0 : state.phase === 'clockout' ? 1 : 2;
+}
 function calcProgress(state) {
-  const totalEntries = state.dates.length * 2;
-  const completed = (state.dateIndex * 2) + (state.phase === 'clockout' ? 1 : 0);
+  const totalEntries = state.dates.length * ENTRIES_PER_DAY;
+  const completed = (state.dateIndex * ENTRIES_PER_DAY) + phaseOffset(state);
   return Math.round((completed / totalEntries) * 100);
 }
 
 function progressText(state) {
-  const phaseLabel = state.phase === 'clockin' ? '自己申告記録（出勤）' : '自己申告記録（退勤）';
+  const phaseLabel = state.phase === 'clockin' ? '自己申告記録（出勤）'
+    : state.phase === 'clockout' ? '自己申告記録（退勤）'
+    : '勤務外時間数（休憩）';
   const dateStr = state.dates[state.dateIndex];
-  const current = (state.dateIndex * 2) + (state.phase === 'clockout' ? 2 : 1);
-  const total = state.dates.length * 2;
+  const current = (state.dateIndex * ENTRIES_PER_DAY) + phaseOffset(state) + 1;
+  const total = state.dates.length * ENTRIES_PER_DAY;
   return `${phaseLabel}：${dateStr}（${current}/${total}）`;
 }
 
@@ -324,11 +393,11 @@ function progressText(state) {
 // Returns the next state, or null if all entries are done.
 function advanceState(state) {
   const next = { ...state, config: { ...state.config } };
-  if (state.phase === 'clockin') {
-    next.phase = 'clockout';
-    return next;
-  }
 
+  if (state.phase === 'clockin')  { next.phase = 'clockout'; return next; }
+  if (state.phase === 'clockout') { next.phase = 'break';    return next; }
+
+  // Finished this day (after 勤務外時間数) — move to the next day's 出勤.
   next.phase = 'clockin';
   next.dateIndex = state.dateIndex + 1;
 
@@ -385,15 +454,18 @@ async function runStateMachine() {
   try {
     switch (page) {
       case 'clockin-input':
-      case 'clockout-input': {
-        const expectedPage = state.phase === 'clockin' ? 'clockin-input' : 'clockout-input';
+      case 'clockout-input':
+      case 'break-input': {
+        const expectedPage = state.phase === 'clockin' ? 'clockin-input'
+          : state.phase === 'clockout' ? 'clockout-input' : 'break-input';
         if (page !== expectedPage) {
           // Wrong page — go back to pick the right one
           navigateToApplicationMenu();
           return;
         }
         sendProgress(progressText(state), percent);
-        await fillDateAndTime(state);
+        if (state.phase === 'break') await fillBreakEntry(state);
+        else await fillDateAndTime(state);
         // State does NOT advance here — it advances on the success page
         break;
       }
@@ -415,7 +487,7 @@ async function runStateMachine() {
         } else {
           // All entries complete
           safeSessionRemove('hrAutoState');
-          sendDone(`${state.dates.length}勤務日の自己申告記録（出勤・退勤）の登録が完了しました（${state.dates.length * 2}件）。`);
+          sendDone(`${state.dates.length}勤務日の自己申告記録（出勤・退勤）と勤務外時間数（休憩）の登録が完了しました（${state.dates.length * 3}件）。`);
         }
         break;
       }
@@ -1458,7 +1530,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     // If already on a usable page, run state machine immediately
     const page = detectPage();
-    if (page === 'application-menu' || page === 'clockin-input' || page === 'clockout-input') {
+    if (page === 'application-menu' || page === 'clockin-input' || page === 'clockout-input' || page === 'break-input') {
       runStateMachine();
     } else {
       navigateToApplicationMenu();
