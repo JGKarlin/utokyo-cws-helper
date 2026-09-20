@@ -1,9 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-let buildMonthRows, statusEventsFromSnapshot, appendHistoryEvent, markMonthsStale, classifyBackgroundOutcome, planBackgroundRun, shouldClearBackgroundAction, cwsAutomationActive, cwsScanActive, shouldRunStatusScan, cwsAutomationStartupCleanupKeys, planCwsScanLock, backgroundAutomationTimeoutMs, chooseReusableCwsTab, monthlySubmissionAlreadyHandled, terminalEntryProgress, historyMessageBody;
+let buildMonthRows, statusEventsFromSnapshot, appendHistoryEvent, markMonthsStale, classifyBackgroundOutcome, planBackgroundRun, shouldClearBackgroundAction, cwsAutomationActive, cwsScanActive, shouldRunStatusScan, cwsAutomationStartupCleanupKeys, planCwsScanLock, backgroundAutomationTimeoutMs, chooseReusableCwsTab, monthlySubmissionAlreadyHandled, terminalEntryProgress, historyMessageBody, confirmMonths, isConfirmedMonth, confirmedMonthKeys, termScanShouldStop, termScanNeeded;
 try {
-  ({ buildMonthRows, statusEventsFromSnapshot, appendHistoryEvent, markMonthsStale, classifyBackgroundOutcome, planBackgroundRun, shouldClearBackgroundAction, cwsAutomationActive, cwsScanActive, shouldRunStatusScan, cwsAutomationStartupCleanupKeys, planCwsScanLock, backgroundAutomationTimeoutMs, chooseReusableCwsTab, monthlySubmissionAlreadyHandled, terminalEntryProgress, historyMessageBody } = require('../status-model.js'));
+  ({ buildMonthRows, statusEventsFromSnapshot, appendHistoryEvent, markMonthsStale, classifyBackgroundOutcome, planBackgroundRun, shouldClearBackgroundAction, cwsAutomationActive, cwsScanActive, shouldRunStatusScan, cwsAutomationStartupCleanupKeys, planCwsScanLock, backgroundAutomationTimeoutMs, chooseReusableCwsTab, monthlySubmissionAlreadyHandled, terminalEntryProgress, historyMessageBody, confirmMonths, isConfirmedMonth, confirmedMonthKeys, termScanShouldStop, termScanNeeded } = require('../status-model.js'));
 } catch (_) {}
 
 test('renders a stored completion message with exactly one month label', () => {
@@ -179,7 +179,7 @@ test('uses a fresh CWS-ready month instead of stale persisted action state', () 
 
   const july = rows.find(row => row.month === '2026-07');
   assert.equal(july.state, 'ready-auto');
-  assert.equal(july.message, '2026年7月分：自動申請の準備ができました。');
+  assert.equal(july.message, '2026年7月分（前月・進行中）：自動申請の準備ができました。');
 });
 
 test('treats the actual pending CWS scan shape as submitted and awaiting approval', () => {
@@ -303,4 +303,172 @@ test('clears only the matching stale action after a retryable outcome', () => {
   const retryable = { completed: false, retryable: true, userAction: null };
   assert.equal(shouldClearBackgroundAction({ month: '2026-07' }, '2026-07', retryable), true);
   assert.equal(shouldClearBackgroundAction({ month: '2026-06' }, '2026-07', retryable), false);
+});
+
+// ── Confirmed-month ledger ────────────────────────────────────────────────────
+// 最終承認 is terminal at CWS: a month can never leave it. Once observed, the
+// month is recorded as confirmed and is never scanned or re-derived again.
+
+test('stamps a finally approved month as confirmed exactly once', () => {
+  assert.equal(typeof confirmMonths, 'function');
+  const first = confirmMonths({
+    '2026-07': { month: '2026-07', approval: 'approved', submittable: false },
+    '2026-08': { month: '2026-08', approval: 'pending', submitted: true, submittable: false },
+    '2026-09': { month: '2026-09', approval: 'none', submittable: true }
+  }, 1000);
+
+  assert.equal(first['2026-07'].confirmed, true);
+  assert.equal(first['2026-07'].confirmedAt, 1000);
+  assert.equal(first['2026-08'].confirmed, undefined);
+  assert.equal(first['2026-09'].confirmed, undefined);
+
+  const second = confirmMonths(first, 2000);
+  assert.equal(second['2026-07'].confirmedAt, 1000, 'keeps the original confirmation time');
+});
+
+test('confirms an approved month even after the cache marked it stale', () => {
+  const confirmed = confirmMonths(markMonthsStale({
+    '2026-05': { month: '2026-05', approval: 'approved', submittable: false, fresh: true }
+  }), 1000);
+  assert.equal(confirmed['2026-05'].confirmed, true);
+});
+
+test('never confirms a month without approval evidence', () => {
+  const confirmed = confirmMonths({
+    '2026-07': { month: '2026-07', submittable: false },
+    '2026-08': { month: '2026-08', approval: 'returned', submittable: true }
+  }, 1000);
+  assert.equal(confirmed['2026-07'].confirmed, undefined);
+  assert.equal(confirmed['2026-08'].confirmed, undefined);
+});
+
+test('a confirmed month is settled, never stale', () => {
+  assert.equal(typeof isConfirmedMonth, 'function');
+  const stale = markMonthsStale(confirmMonths({
+    '2026-07': { month: '2026-07', approval: 'approved', submittable: false },
+    '2026-08': { month: '2026-08', approval: 'none', submittable: true }
+  }, 1000));
+
+  assert.equal(stale['2026-07'].stale, undefined);
+  assert.equal(stale['2026-07'].fresh, undefined);
+  assert.equal(isConfirmedMonth(stale['2026-07']), true);
+  assert.equal(stale['2026-08'].stale, true, 'unconfirmed months still go stale');
+});
+
+test('a confirmed month outranks pending, processing and action state', () => {
+  const rows = buildMonthRows({
+    currentMonth: '2026-09',
+    months: confirmMonths({
+      '2026-07': { month: '2026-07', approval: 'approved', submittable: false }
+    }, 1000),
+    pending: { targetMonth: '2026-07', prevMonth: '2026-06' },
+    activeRun: { month: '2026-07', state: 'processing' },
+    userAction: { month: '2026-07', message: '古い失敗' },
+    autoSubmitEnabled: true
+  });
+  const july = rows[0];
+  assert.equal(july.state, 'approved');
+  assert.equal(july.confirmed, true);
+  assert.equal(july.actionMonth, undefined);
+});
+
+test('lists the confirmed months a scan may skip', () => {
+  assert.equal(typeof confirmedMonthKeys, 'function');
+  const months = confirmMonths({
+    '2026-05': { month: '2026-05', approval: 'approved' },
+    '2026-07': { month: '2026-07', approval: 'approved' },
+    '2026-08': { month: '2026-08', approval: 'pending', submitted: true }
+  }, 1000);
+  assert.deepEqual(confirmedMonthKeys(months), ['2026-05', '2026-07']);
+  assert.deepEqual(confirmedMonthKeys(null), []);
+});
+
+// ── Backward scan walk ───────────────────────────────────────────────────────
+
+test('stops the backward walk before stepping into a confirmed month', () => {
+  assert.equal(typeof termScanShouldStop, 'function');
+  const options = { current: '2026-09', maxSteps: 12, confirmedMonths: ['2026-08', '2026-07', '2026-06'] };
+
+  const atCurrent = termScanShouldStop(Object.assign({ month: '2026-09', submittable: true, steps: 1 }, options));
+  assert.equal(atCurrent.stop, true);
+  assert.equal(atCurrent.reason, 'confirmed-previous');
+});
+
+test('stops immediately when the walk lands on a confirmed month', () => {
+  const landed = termScanShouldStop({
+    month: '2026-08', current: '2026-09', submittable: false, steps: 1,
+    maxSteps: 12, confirmedMonths: ['2026-08']
+  });
+  assert.equal(landed.stop, true);
+  assert.equal(landed.reason, 'confirmed');
+});
+
+test('keeps walking while unconfirmed months remain', () => {
+  const keepGoing = termScanShouldStop({
+    month: '2026-09', current: '2026-09', submittable: true, steps: 1,
+    maxSteps: 12, confirmedMonths: []
+  });
+  assert.equal(keepGoing.stop, false);
+});
+
+test('retains the closed-window and lookback limits', () => {
+  const closed = termScanShouldStop({
+    month: '2026-08', current: '2026-09', submittable: false, steps: 1,
+    maxSteps: 12, confirmedMonths: []
+  });
+  assert.equal(closed.stop, true);
+  assert.equal(closed.reason, 'closed');
+
+  const exhausted = termScanShouldStop({
+    month: '2026-09', current: '2026-09', submittable: true, steps: 12,
+    maxSteps: 12, confirmedMonths: []
+  });
+  assert.equal(exhausted.stop, true);
+  assert.equal(exhausted.reason, 'max-steps');
+});
+
+test('skips the scan entirely once the current month itself is confirmed', () => {
+  assert.equal(typeof termScanNeeded, 'function');
+  const months = confirmMonths({ '2026-09': { month: '2026-09', approval: 'approved' } }, 1000);
+  assert.equal(termScanNeeded({ currentMonth: '2026-09', months }), false);
+  assert.equal(termScanNeeded({ currentMonth: '2026-09', months: {} }), true);
+});
+
+// ── Relative-position labels ─────────────────────────────────────────────────
+
+test('tags the current month and the previous month by position', () => {
+  const rows = buildMonthRows({
+    currentMonth: '2026-09',
+    months: confirmMonths({
+      '2026-07': { month: '2026-07', approval: 'approved', submittable: false },
+      '2026-08': { month: '2026-08', approval: 'approved', submittable: false },
+      '2026-09': { month: '2026-09', approval: 'none', submittable: true, fresh: true }
+    }, 1000),
+    autoSubmitEnabled: true
+  });
+
+  assert.equal(rows.find(row => row.month === '2026-09').message,
+    '2026年9月分（今月・進行中）：自動申請の準備ができました。');
+  assert.equal(rows.find(row => row.month === '2026-08').message,
+    '2026年8月分（前月）：最終承認済み');
+  assert.equal(rows.find(row => row.month === '2026-07').message,
+    '2026年7月分：最終承認済み', 'older months carry no position tag');
+});
+
+test('tags an unapproved previous month as awaiting approval', () => {
+  const rows = buildMonthRows({
+    currentMonth: '2026-09',
+    months: {
+      '2026-08': { month: '2026-08', approval: 'pending', submitted: true, submittable: false, fresh: true }
+    },
+    autoSubmitEnabled: true
+  });
+  assert.equal(rows[0].message, '2026年8月分（前月・承認待ち）：提出済み（承認待ち）');
+});
+
+test('strips a tagged month label from a stored history message', () => {
+  assert.equal(
+    historyMessageBody('2026-09', '2026年9月分（今月・進行中）：自動申請の準備ができました。'),
+    '自動申請の準備ができました。'
+  );
 });

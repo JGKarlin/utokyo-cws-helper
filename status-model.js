@@ -35,10 +35,46 @@
       .map(month => [month, Object.assign({ month }, months[month])]);
   }
 
+  function isApprovedApproval(approval) {
+    const value = String(approval || '').toLowerCase();
+    return value === 'approved' || value === 'final' || value === 'complete';
+  }
+
+  // 最終承認 is terminal at CWS — a month can never leave it. Once a month has been
+  // observed approved it is recorded as confirmed and is never scanned or re-derived
+  // again, which is what keeps the backward walk out of settled months.
+  function isConfirmedMonth(entry) {
+    return !!(entry && entry.confirmed === true);
+  }
+
+  function confirmMonths(months, now) {
+    const at = Number(now) || Date.now();
+    // Approval is only ever written from a live 【処理状況】 reading, so an entry that
+    // carries it is real evidence no matter how old the surrounding cache row is.
+    const stamp = entry => {
+      if (!entry || isConfirmedMonth(entry) || !isApprovedApproval(entry.approval)) return entry;
+      return Object.assign({}, entry, { confirmed: true, confirmedAt: at });
+    };
+    if (Array.isArray(months)) return months.map(stamp);
+    if (!months || typeof months !== 'object') return {};
+    return Object.keys(months).reduce((result, month) => {
+      result[month] = stamp(months[month]);
+      return result;
+    }, {});
+  }
+
+  function confirmedMonthKeys(months) {
+    return monthEntries(months)
+      .filter(pair => isConfirmedMonth(pair[1]))
+      .map(pair => pair[0])
+      .sort();
+  }
+
   function stateFromLiveEntry(entry, autoSubmitEnabled) {
     const value = entry || {};
+    if (isConfirmedMonth(value)) return 'approved';
     const approval = String(value.approval || '').toLowerCase();
-    if (approval === 'approved' || approval === 'final' || approval === 'complete') return 'approved';
+    if (isApprovedApproval(approval)) return 'approved';
     if (approval === 'returned' || approval === 'rejected') return 'returned';
     if (value.submitted === true && (approval === 'pending' || approval === 'none' || !approval)) {
       return 'submitted-pending';
@@ -54,6 +90,7 @@
 
   function hasAuthoritativeLiveStatus(entry) {
     const value = entry || {};
+    if (isConfirmedMonth(value)) return true;
     if (value.stale === true || value.staleFallback === true || value.fresh === false || value.source === 'stale') return false;
     if (value.fresh === true || value.source === 'live') return true;
     const approval = String(value.approval || '').toLowerCase();
@@ -75,13 +112,20 @@
     const text = String(message || '');
     const match = MONTH_PATTERN.exec(String(month || ''));
     if (!match) return text;
-    const prefix = `${match[1]}年${Number(match[2])}月分：`;
-    return text.startsWith(prefix) ? text.slice(prefix.length) : text;
+    const label = `${match[1]}年${Number(match[2])}月分`;
+    if (text.startsWith(label + '：')) return text.slice(label.length + 1);
+    if (text.startsWith(label + '（')) {
+      const close = text.indexOf('）：', label.length);
+      if (close !== -1) return text.slice(close + 2);
+    }
+    return text;
   }
 
   function markMonthsStale(months) {
+    // A confirmed month is settled, not stale: a failed scan says nothing new about
+    // a period that has already been finally approved.
     if (Array.isArray(months)) {
-      return months.filter(entry => entry && entry.month).map(entry => Object.assign({}, entry, {
+      return months.filter(entry => entry && entry.month).map(entry => isConfirmedMonth(entry) ? entry : Object.assign({}, entry, {
         stale: true,
         staleFallback: true,
         fresh: false,
@@ -91,7 +135,9 @@
     if (!months || typeof months !== 'object') return {};
     return Object.keys(months).reduce((result, month) => {
       const entry = months[month];
-      if (entry) {
+      if (isConfirmedMonth(entry)) {
+        result[month] = Object.assign({}, entry, { month: entry.month || month });
+      } else if (entry) {
         result[month] = Object.assign({}, entry, {
           month: entry.month || month,
           stale: true,
@@ -109,13 +155,42 @@
     return match ? match[1] + '年' + Number(match[2]) + '月' : String(month || '');
   }
 
-  function messageForState(month, state, pending, userAction) {
-    const label = formatMonthLabel(month) + '分';
+  // Where the month sits relative to today. Only 今月 and 前月 carry a tag; anything
+  // older reads as its own month name without one.
+  function monthPositionLabel(month, currentMonth) {
+    if (!currentMonth) return '';
+    if (month === currentMonth) return '今月';
+    if (month === monthMinus(currentMonth, 1)) return '前月';
+    return '';
+  }
+
+  function stateQualifier(state) {
+    switch (state) {
+      case 'submitted-pending':
+      case 'waiting-approval': return '承認待ち';
+      case 'returned': return '差戻し';
+      case 'processing': return '処理中';
+      case 'ready-auto':
+      case 'ready': return '進行中';
+      case 'user-action-required': return '要確認';
+      default: return '';
+    }
+  }
+
+  function monthTag(month, state, currentMonth) {
+    const position = monthPositionLabel(month, currentMonth);
+    if (!position) return '';
+    const qualifier = stateQualifier(state);
+    return '（' + (qualifier ? position + '・' + qualifier : position) + '）';
+  }
+
+  function messageForState(month, state, pending, userAction, currentMonth) {
+    const label = formatMonthLabel(month) + '分' + monthTag(month, state, currentMonth);
     const previous = pending && pending.targetMonth === month && pending.prevMonth
       ? formatMonthLabel(pending.prevMonth) + '分' : '';
     switch (state) {
       case 'submitted-pending': return label + '：提出済み（承認待ち）';
-      case 'approved': return label + '：最終承認済みです。';
+      case 'approved': return label + '：最終承認済み';
       case 'returned': return label + '：差戻しです。自動処理を確認中です。';
       case 'waiting-approval': return previous
         ? label + '：' + previous + 'の承認待ち。承認後に自動申請します。'
@@ -189,7 +264,7 @@
       const row = Object.assign({}, entry, {
         month,
         state,
-        message: messageForState(month, state, pending, userAction)
+        message: messageForState(month, state, pending, userAction, options.currentMonth)
       });
       if (state === 'user-action-required') {
         row.actionMonth = month;
@@ -324,6 +399,36 @@
     return { defer: fresh, stale: !fresh };
   }
 
+  // One stop decision for the backward 勤務表 walk. Beyond the original rules — a past
+  // month whose submission window has closed, and the lookback ceiling — the walk now
+  // refuses to descend into a month already confirmed 最終承認済み.
+  function termScanShouldStop(options) {
+    const value = options || {};
+    const confirmed = new Set(Array.isArray(value.confirmedMonths) ? value.confirmedMonths : []);
+    if (confirmed.has(value.month)) return { stop: true, reason: 'confirmed' };
+
+    const currentIndex = monthIndex(value.current);
+    const thisIndex = monthIndex(value.month);
+    if (currentIndex !== null && thisIndex !== null && thisIndex < currentIndex && value.submittable !== true) {
+      return { stop: true, reason: 'closed' };
+    }
+
+    const maxSteps = Number(value.maxSteps) || 12;
+    if ((Number(value.steps) || 0) >= maxSteps) return { stop: true, reason: 'max-steps' };
+
+    const previousMonth = monthMinus(value.month, 1);
+    if (previousMonth && confirmed.has(previousMonth)) return { stop: true, reason: 'confirmed-previous' };
+    return { stop: false, reason: '' };
+  }
+
+  // The one case where visiting CWS cannot tell us anything new: the current month is
+  // itself finally approved, so every older month is settled by definition.
+  function termScanNeeded(options) {
+    const value = options || {};
+    const entries = new Map(monthEntries(value.months));
+    return !isConfirmedMonth(entries.get(value.currentMonth));
+  }
+
   function backgroundAutomationTimeoutMs() {
     // A full month is roughly 20 workdays × three separate CWS submissions.
     // The live site can take more than twenty minutes for the full sequence plus
@@ -383,6 +488,11 @@
     chooseReusableCwsTab,
     monthlySubmissionAlreadyHandled,
     terminalEntryProgress,
-    historyMessageBody
+    historyMessageBody,
+    isConfirmedMonth,
+    confirmMonths,
+    confirmedMonthKeys,
+    termScanShouldStop,
+    termScanNeeded
   };
 });

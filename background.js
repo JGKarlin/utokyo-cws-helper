@@ -214,6 +214,12 @@ async function handleTermObserved(msg) {
       submittable: !!pe.submittable, approval: 'approved',
     };
   }
+  // 最終承認 is terminal: record it in the ledger so neither the panel scan nor this
+  // observer ever visits the month again.
+  const statusModel = globalThis.HRStatusModel;
+  if (statusModel && typeof statusModel.confirmMonths === 'function') {
+    cache.months = statusModel.confirmMonths(cache.months, Date.now());
+  }
   try { await chrome.storage.local.set({ hrTermStatusCache: cache }); } catch (_) {}
   await recomputeTermReady();
 }

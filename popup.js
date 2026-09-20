@@ -643,10 +643,10 @@ async function prepareTermTab(tabId, deadlineMs = 25000) {
   throw new Error('勤務表ページへ移動できませんでした');
 }
 
-async function runTermScan(tabId, deadlineMs = 70000) {
+async function runTermScan(tabId, confirmedMonths = [], deadlineMs = 70000) {
   const deadline = Date.now() + deadlineMs;
   while (Date.now() < deadline) {
-    const res = await sendMessageWithRetry(tabId, { type: 'SCAN_TERM_STATUS_STEP' }, 12000);
+    const res = await sendMessageWithRetry(tabId, { type: 'SCAN_TERM_STATUS_STEP', confirmedMonths }, 12000);
     if (res && res.error) throw new Error(res.error);
     if (res && res.done) return { months: res.months || {}, currentMonth: res.current };
     setTermStatus((res && res.step) || '確認中...');
@@ -670,14 +670,22 @@ function isTermCacheFresh(cache) {
     (Date.now() - cache.scannedAt) < TERM_CACHE_TTL_MS);
 }
 
-function mergedTermMonths(previousMonths, liveMonths) {
+function mergedTermMonths(previousMonths, liveMonths, observedAt) {
+  const model = globalThis.HRStatusModel;
+  const isConfirmed = entry => !!(model && model.isConfirmedMonth(entry));
   const merged = {};
   Object.entries(previousMonths || {}).forEach(([month, entry]) => {
     if (!entry) return;
-    merged[month] = Object.assign({}, entry, { month: entry.month || month, stale: true, fresh: false, source: 'stale' });
+    // A confirmed month is settled — it is never re-scanned, so it is never stale.
+    merged[month] = isConfirmed(entry)
+      ? Object.assign({}, entry, { month: entry.month || month })
+      : Object.assign({}, entry, { month: entry.month || month, stale: true, fresh: false, source: 'stale' });
   });
   Object.entries(liveMonths || {}).forEach(([month, entry]) => {
     if (!entry) return;
+    // The live 勤務表 stays authoritative for status — only the ledger stamp carries
+    // over, so a re-read of a confirmed month keeps its original confirmation time.
+    const previous = merged[month];
     merged[month] = Object.assign({}, entry, {
       month: entry.month || month,
       stale: false,
@@ -685,8 +693,12 @@ function mergedTermMonths(previousMonths, liveMonths) {
       fresh: true,
       source: 'live'
     });
+    if (isConfirmed(previous)) {
+      merged[month].confirmed = true;
+      merged[month].confirmedAt = previous.confirmedAt;
+    }
   });
-  return merged;
+  return model ? model.confirmMonths(merged, observedAt || Date.now()) : merged;
 }
 
 function appendScanHistory(history, previousMonths, nextMonths, currentMonth, observedAt) {
@@ -720,13 +732,42 @@ async function loadTermRenderState() {
 function pendingIsSatisfiedByFreshScan(pending, months) {
   if (!pending || !pending.targetMonth || !pending.prevMonth) return false;
   const previous = months && months[pending.prevMonth];
-  return !!(previous && previous.fresh === true && previous.approval === 'approved');
+  if (!previous) return false;
+  const model = globalThis.HRStatusModel;
+  // A confirmed month is never re-scanned, so it can never come back `fresh` — the
+  // ledger entry is the stronger signal and lifts the block on its own.
+  if (model && model.isConfirmedMonth(previous)) return true;
+  return previous.fresh === true && previous.approval === 'approved';
 }
 
 async function discoverTermStatus(isOnDomain) {
   const renderState = await loadTermRenderState();
   let cache = (await chrome.storage.local.get(TERM_CACHE_KEY))[TERM_CACHE_KEY];
   const fresh = isTermCacheFresh(cache);
+  const statusModel = globalThis.HRStatusModel;
+
+  // Backfill the ledger from what the cache already knows, so months approved before
+  // the ledger existed are confirmed — and shown with their checkmark — without
+  // another CWS visit.
+  if (statusModel && cache && cache.months) {
+    const ledgerMonths = statusModel.confirmMonths(cache.months, Date.now());
+    const before = statusModel.confirmedMonthKeys(cache.months);
+    const after = statusModel.confirmedMonthKeys(ledgerMonths);
+    if (after.length !== before.length) {
+      cache = Object.assign({}, cache, { months: ledgerMonths });
+      const currentMonth = cache.currentMonth || thisCalendarMonthKey();
+      let history = (await chrome.storage.local.get(TERM_HISTORY_KEY))[TERM_HISTORY_KEY];
+      after.filter(month => before.indexOf(month) === -1).forEach(month => {
+        history = statusModel.appendHistoryEvent(history, {
+          month,
+          type: 'approved',
+          state: 'approved',
+          at: (ledgerMonths[month] || {}).confirmedAt || Date.now()
+        }, currentMonth);
+      });
+      await chrome.storage.local.set({ [TERM_CACHE_KEY]: cache, [TERM_HISTORY_KEY]: history });
+    }
+  }
 
   // CWS is effectively single-session. When automatic current-month entry is
   // enabled, reserve it exclusively for that full-month run; do not launch the
@@ -754,6 +795,18 @@ async function discoverTermStatus(isOnDomain) {
     return;
   }
 
+  // 最終承認 is terminal, so a month already confirmed can never change. If even the
+  // current month is confirmed there is nothing left for a CWS visit to discover.
+  const confirmedMonths = statusModel ? statusModel.confirmedMonthKeys(cache && cache.months) : [];
+  if (statusModel && !statusModel.termScanNeeded({
+    currentMonth: (cache && cache.currentMonth) || thisCalendarMonthKey(),
+    months: cache && cache.months
+  })) {
+    const history = (await chrome.storage.local.get(TERM_HISTORY_KEY))[TERM_HISTORY_KEY];
+    renderTermSection(cache, renderState, history);
+    return;
+  }
+
   setTermStatus('未提出の月を確認中...');
   document.getElementById('termCurrentStatus').replaceChildren();
 
@@ -764,12 +817,12 @@ async function discoverTermStatus(isOnDomain) {
     tabId = tab.id;
     await waitForTabComplete(tabId);
     await prepareTermTab(tabId);
-    const scan = await runTermScan(tabId);
+    const scan = await runTermScan(tabId, confirmedMonths);
     await chrome.tabs.remove(tabId).catch(() => {});
     tabId = null;
     const scannedAt = Date.now();
     const previousMonths = (cache && cache.months) || {};
-    const months = mergedTermMonths(previousMonths, scan.months);
+    const months = mergedTermMonths(previousMonths, scan.months, scannedAt);
     const currentMonth = scan.currentMonth || thisCalendarMonthKey();
     cache = { scannedAt, currentMonth, months };
     const oldHistory = (await chrome.storage.local.get(TERM_HISTORY_KEY))[TERM_HISTORY_KEY];
@@ -794,15 +847,25 @@ async function discoverTermStatus(isOnDomain) {
 }
 
 function isStaleRow(row, staleFallback) {
+  const model = globalThis.HRStatusModel;
+  if (model && model.isConfirmedMonth(row)) return false;
   return staleFallback || row.stale === true || row.staleFallback === true || row.fresh === false || row.source === 'stale';
 }
 
 function appendTermStatusRow(container, row, staleFallback) {
   const documentRef = container.ownerDocument;
+  const model = globalThis.HRStatusModel;
+  const confirmed = !!(model && model.isConfirmedMonth(row));
   const item = documentRef.createElement('div');
-  item.className = `term-row term-row--${row.state}`;
+  item.className = `term-row term-row--${row.state}${confirmed ? ' term-row--confirmed' : ''}`;
   const message = documentRef.createElement('div');
-  message.textContent = row.message;
+  if (confirmed) {
+    const check = documentRef.createElement('span');
+    check.className = 'term-check';
+    check.textContent = '✓';
+    message.appendChild(check);
+  }
+  message.appendChild(documentRef.createTextNode(row.message));
   item.appendChild(message);
 
   if (isStaleRow(row, staleFallback)) {
@@ -831,7 +894,7 @@ function historyOutcome(event) {
   }
   switch (event.state) {
     case 'submitted-pending': return '提出済み（承認待ち）';
-    case 'approved': return '最終承認済み';
+    case 'approved': return '最終承認済み（確認済み）';
     case 'returned': return '差戻し';
     case 'waiting-approval': return '前月の承認待ち';
     case 'processing': return '自動処理を開始';

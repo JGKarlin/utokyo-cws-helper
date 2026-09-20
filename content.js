@@ -1234,27 +1234,48 @@ async function prepareTermPage() {
 
 // One resumable step of the backward status walk (driven by the popup across the
 // full-page reloads that ＜＜ triggers). Records each month's submittable flag and
-// stops at the first PAST month whose 月次申請 button is gone (window closed).
-async function termScanStep() {
+// stops at the first PAST month whose 月次申請 button is gone (window closed), at the
+// lookback ceiling, or — the usual case — as soon as the next month back is already
+// confirmed 最終承認済み, since 承認 is terminal and cannot change.
+async function termScanStep(confirmedMonths) {
   if (!isTermPage()) return { navigating: true, step: '勤務表の読み込み待ち...', waitMs: 1000 };
   const month = readDisplayedTermMonth();
   if (!month) return { error: '勤務表の対象月を読み取れませんでした' };
   const current = currentMonthKey();
   const r = await chrome.storage.session.get('hrTermScan');
   const scan = r.hrTermScan || { collected: {}, steps: 0 };
-  scan.collected[month] = { month, label: formatMonthLabel(month), submittable: isMonthSubmittable(), approval: readTermApprovalStatus() };
-  if (isPrevApprovedOnTermPage()) {
-    const previousMonth = monthMinus(month, 1);
-    scan.collected[previousMonth] = Object.assign({}, scan.collected[previousMonth], {
-      month: previousMonth,
-      label: formatMonthLabel(previousMonth),
-      submittable: false,
-      approval: 'approved'
-    });
+  // The confirmed set arrives with the first step only; keep it in session storage so
+  // it survives the full-page reloads that ＜＜ triggers.
+  if (Array.isArray(confirmedMonths) && confirmedMonths.length) scan.confirmed = confirmedMonths;
+  const confirmed = Array.isArray(scan.confirmed) ? scan.confirmed : [];
+
+  // A month already confirmed 最終承認済み can never change — don't even read it.
+  if (confirmed.indexOf(month) === -1) {
+    scan.collected[month] = { month, label: formatMonthLabel(month), submittable: isMonthSubmittable(), approval: readTermApprovalStatus() };
+    if (isPrevApprovedOnTermPage()) {
+      const previousMonth = monthMinus(month, 1);
+      scan.collected[previousMonth] = Object.assign({}, scan.collected[previousMonth], {
+        month: previousMonth,
+        label: formatMonthLabel(previousMonth),
+        submittable: false,
+        approval: 'approved'
+      });
+    }
   }
   scan.steps = (scan.steps || 0) + 1;
-  const pastClosed = monthDelta(month, current) < 0 && !scan.collected[month].submittable;
-  if (pastClosed || scan.steps >= MAX_TERM_LOOKBACK) {
+
+  const model = globalThis.HRStatusModel;
+  const decision = model && typeof model.termScanShouldStop === 'function'
+    ? model.termScanShouldStop({
+        month,
+        current,
+        submittable: scan.collected[month] ? scan.collected[month].submittable : false,
+        steps: scan.steps,
+        maxSteps: MAX_TERM_LOOKBACK,
+        confirmedMonths: confirmed
+      })
+    : { stop: (monthDelta(month, current) < 0 && !(scan.collected[month] || {}).submittable) || scan.steps >= MAX_TERM_LOOKBACK };
+  if (decision.stop) {
     await chrome.storage.session.remove('hrTermScan');
     return { done: true, months: scan.collected, current };
   }
@@ -1660,7 +1681,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'SCAN_TERM_STATUS_STEP') {
-    termScanStep()
+    termScanStep(msg.confirmedMonths)
       .then(result => sendResponse(result))
       .catch(err => sendResponse({ error: err.message }));
     return true;

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "勤務時間 自動入力",
-  "version": "2.4.14",
+  "version": "2.5.0",
   "description": "東京大学就労管理システム 自己申告記録 自動入力ツール",
   "permissions": [
     "activeTab",
@@ -37,7 +37,7 @@
   "content_scripts": [
     {
       "matches": ["https://ut-ppsweb.adm.u-tokyo.ac.jp/*"],
-      "js": ["navigation-model.js", "term-hours-model.js", "content.js"],
+      "js": ["navigation-model.js", "term-hours-model.js", "status-model.js", "content.js"],
       "run_at": "document_idle"
     }
   ]
