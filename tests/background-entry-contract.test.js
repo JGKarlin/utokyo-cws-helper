@@ -42,3 +42,24 @@ test('keeps an entry-only run at the end of the month scale while it re-verifies
   // After the last entry (~98%), the re-check must not drop back to the submission scale's 60%.
   assert.match(content, /pendingSubmit\.entryOnly \? 99 : submitPercent\(pendingSubmit, 60\)/);
 });
+
+test('names the submitted months in the completion message and notification', () => {
+  const start = content.indexOf('async function advanceSubmitQueue');
+  const body = content.slice(start, content.indexOf('\n}\n', start));
+  assert.doesNotMatch(body, /\$\{n\}件の月次申請が完了しました/);
+  assert.match(body, /の月次申請を提出しました（承認待ち）。/);
+});
+
+test('stamps when a month status was observed so the panel can tell how current it is', () => {
+  const start = content.indexOf('async function markTermSubmitted');
+  assert.match(content.slice(start, content.indexOf('\n}\n', start)), /observedAt: Date\.now\(\)/);
+  const observed = background.indexOf('async function handleTermObserved');
+  assert.match(background.slice(observed, background.indexOf('\n}\n', observed)), /observedAt: Date\.now\(\)/);
+});
+
+test('decides which months are past against today, not the last status scan', () => {
+  const start = background.indexOf('function computeReadyMonths');
+  const body = background.slice(start, background.indexOf('\n}\n', start));
+  assert.doesNotMatch(body, /cache\.currentMonth/);
+  assert.match(body, /thisCalMonthKey\(\)/);
+});

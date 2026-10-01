@@ -121,11 +121,15 @@
     return text;
   }
 
-  function markMonthsStale(months) {
+  function markMonthsStale(months, options) {
     // A confirmed month is settled, not stale: a failed scan says nothing new about
-    // a period that has already been finally approved.
+    // a period that has already been finally approved. Nor is a month observed live
+    // recently (e.g. submitted minutes ago) — with { now, freshForMs }, that one stays.
+    const value = options || {};
+    const settled = entry => isConfirmedMonth(entry) || !!(value.now && value.freshForMs &&
+      entry && entry.observedAt && value.now - entry.observedAt < value.freshForMs);
     if (Array.isArray(months)) {
-      return months.filter(entry => entry && entry.month).map(entry => isConfirmedMonth(entry) ? entry : Object.assign({}, entry, {
+      return months.filter(entry => entry && entry.month).map(entry => settled(entry) ? entry : Object.assign({}, entry, {
         stale: true,
         staleFallback: true,
         fresh: false,
@@ -135,7 +139,7 @@
     if (!months || typeof months !== 'object') return {};
     return Object.keys(months).reduce((result, month) => {
       const entry = months[month];
-      if (isConfirmedMonth(entry)) {
+      if (settled(entry)) {
         result[month] = Object.assign({}, entry, { month: entry.month || month });
       } else if (entry) {
         result[month] = Object.assign({}, entry, {
@@ -172,6 +176,7 @@
       case 'processing': return '処理中';
       case 'ready-auto':
       case 'ready': return '進行中';
+      case 'hours-complete': return '入力済み';
       case 'user-action-required': return '要確認';
       default: return '';
     }
@@ -201,6 +206,22 @@
       case 'user-action-required': return label + '：' + ((userAction && userAction.message) || '確認が必要です。');
       default: return label + '：申請対象外です。';
     }
+  }
+
+  // The current month can't be submitted until next month, so its useful status is the
+  // hours entry: once that is complete, say so and when the 月次申請 will happen.
+  const CURRENT_MONTH_HOURS_STATES = ['not-eligible', 'ready', 'ready-auto', 'waiting-approval'];
+
+  function currentMonthHoursMessage(month, hours, autoSubmitEnabled, currentMonth) {
+    const index = monthIndex(month);
+    const next = monthFromIndex(index + 1);
+    const [year, number] = next.split('-').map(Number);
+    const nextLabel = Math.floor(index / 12) === year ? number + '月' : year + '年' + number + '月';
+    const submission = autoSubmitEnabled
+      ? '月次申請は' + nextLabel + 'に自動で行います。'
+      : nextLabel + 'から月次申請できます。';
+    return formatMonthLabel(month) + '分' + monthTag(month, 'hours-complete', currentMonth) + '：' +
+      historyMessageBody(month, hours.message) + submission;
   }
 
   function referenceMonths(input) {
@@ -238,6 +259,11 @@
         if (index !== null && (index < oldestIndex || index > currentIndex)) entries.delete(month);
       });
     }
+    const currentHours = options.currentMonthHours && options.currentMonthHours.message
+      ? options.currentMonthHours : null;
+    if (currentHours && currentIndex !== null && !entries.has(options.currentMonth)) {
+      entries.set(options.currentMonth, { month: options.currentMonth });
+    }
     referenceMonths(options).forEach(month => {
       const index = monthIndex(month);
       if (index === null || oldestIndex === null || (index >= oldestIndex && index <= currentIndex)) {
@@ -259,6 +285,16 @@
         state = 'processing';
       } else if (isBlockedByPreviousApproval(pending, entries, month, state) && !isSubmittedOrFinalState(state)) {
         state = 'waiting-approval';
+      }
+
+      if (currentHours && month === options.currentMonth && CURRENT_MONTH_HOURS_STATES.indexOf(state) !== -1) {
+        // Recorded from the live 勤務表 — current, whatever the cached scan's age.
+        return Object.assign({}, entry, {
+          month,
+          state: 'hours-complete',
+          message: currentMonthHoursMessage(month, currentHours, autoSubmitEnabled, options.currentMonth),
+          stale: false, staleFallback: false, fresh: true, source: 'live'
+        });
       }
 
       const row = Object.assign({}, entry, {

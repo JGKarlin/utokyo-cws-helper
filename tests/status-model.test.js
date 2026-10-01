@@ -496,3 +496,49 @@ test('keeps live progress and 停止 visible while automation runs in a non-acti
     settings: true, live: true, offDomainNotice: false, startButton: false, stopButton: false, buttonRow: false
   });
 });
+
+// ── Current month (今月) hours status ───────────────────────────────────────
+
+const OCTOBER_HOURS = { message: '2026年10月分：勤務時間の入力完了（21勤務日）。出勤・退勤・勤務外時間数を確認済み。' };
+
+test('shows the current month with its completed hours even before CWS lists it', () => {
+  const months = {
+    '2026-09': { month: '2026-09', approval: 'pending', submitted: true, submittable: false, fresh: true },
+    '2026-08': confirmMonths({ '2026-08': { month: '2026-08', approval: 'approved' } }, 1000)['2026-08']
+  };
+  const rows = buildMonthRows({ currentMonth: '2026-10', months, autoSubmitEnabled: true, currentMonthHours: OCTOBER_HOURS });
+  assert.deepEqual(rows.map(row => row.month), ['2026-10', '2026-09', '2026-08']);
+  assert.equal(rows[0].state, 'hours-complete');
+  assert.equal(rows[0].message,
+    '2026年10月分（今月・入力済み）：勤務時間の入力完了（21勤務日）。出勤・退勤・勤務外時間数を確認済み。月次申請は11月に自動で行います。');
+  assert.equal(rows[1].message, '2026年9月分（前月・承認待ち）：提出済み（承認待ち）');
+  assert.equal(rows[2].message, '2026年8月分：最終承認済み');
+});
+
+test('says when the current month can be submitted when auto-submit is off', () => {
+  const rows = buildMonthRows({ currentMonth: '2026-12', months: {}, autoSubmitEnabled: false,
+    currentMonthHours: { message: '2026年12月分：勤務時間の入力完了（19勤務日）。出勤・退勤・勤務外時間数を確認済み。' } });
+  assert.equal(rows[0].message,
+    '2026年12月分（今月・入力済み）：勤務時間の入力完了（19勤務日）。出勤・退勤・勤務外時間数を確認済み。2027年1月から月次申請できます。');
+});
+
+test('keeps a submitted or approved current month as it is', () => {
+  const rows = buildMonthRows({ currentMonth: '2026-10', autoSubmitEnabled: true, currentMonthHours: OCTOBER_HOURS,
+    months: { '2026-10': { month: '2026-10', approval: 'pending', submitted: true, fresh: true } } });
+  assert.equal(rows[0].state, 'submitted-pending');
+});
+
+test('does not mark a month stale when it was observed recently', () => {
+  const now = 10 * 60 * 60 * 1000;
+  const months = {
+    '2026-09': { month: '2026-09', approval: 'pending', submitted: true, observedAt: now - 60 * 1000 },
+    '2026-07': { month: '2026-07', approval: 'none', observedAt: now - 9 * 60 * 60 * 1000 },
+    '2026-06': { month: '2026-06', approval: 'none' }
+  };
+  const marked = markMonthsStale(months, { now, freshForMs: 6 * 60 * 60 * 1000 });
+  assert.notEqual(marked['2026-09'].stale, true);
+  assert.equal(marked['2026-07'].stale, true);
+  assert.equal(marked['2026-06'].stale, true);
+  // Without a clock, every unconfirmed month is stale as before.
+  assert.equal(markMonthsStale(months)['2026-09'].stale, true);
+});

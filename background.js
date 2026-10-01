@@ -154,7 +154,8 @@ async function stopActivitySpinner() {
 
 function computeReadyMonths(cache, pendingMonth) {
   const months = (cache && cache.months) || {};
-  const current = (cache && cache.currentMonth) || thisCalMonthKey();
+  // Past means before today's month — the cache's scan month can lag behind.
+  const current = thisCalMonthKey();
   const ready = [];
   for (const m of Object.values(months)) {
     if (!m || !m.month) continue;
@@ -206,6 +207,7 @@ async function handleTermObserved(msg) {
   cache.months[msg.month] = {
     ...cur, month: msg.month, label: msg.label || cur.label,
     submittable: !!msg.submittable, approval: msg.approval || cur.approval || 'none',
+    observedAt: Date.now(),
   };
   if (msg.prevApproved && msg.prevMonth) {
     const pe = cache.months[msg.prevMonth] || {};

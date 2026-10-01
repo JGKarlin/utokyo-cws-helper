@@ -1369,7 +1369,7 @@ async function markTermSubmitted(month) {
     if (!cache.months) cache.months = {};
     cache.months[month] = {
       ...(cache.months[month] || {}), month, submittable: false, submitted: true, approval: 'pending',
-      fresh: true, stale: false, staleFallback: false, source: 'live'
+      fresh: true, stale: false, staleFallback: false, source: 'live', observedAt: Date.now()
     };
     const updates = { hrTermStatusCache: cache };
     if (r.hrPendingSubmit && r.hrPendingSubmit.targetMonth === month) updates.hrPendingSubmit = null;
@@ -1413,13 +1413,14 @@ async function advanceSubmitQueue(sub, submitted, dryRun) {
     sendProgress(`次の対象月（${formatMonthLabel(nextMonth)}）を処理します...`, submitPercent(next, 0));
     return runSubmitStateMachine(next);
   }
-  const n = sub.queue.length;
+  // Name the months — "1件の…" doesn't say which month was just submitted.
+  const labels = sub.queue.map(m => `${formatMonthLabel(m)}分`).join('・');
   let message;
   if (dryRun) {
-    message = `（テスト実行）${n}件の月次申請を申請直前まで確認しました。実際の送信は行っていません。`;
+    message = `（テスト実行）${labels}の月次申請を申請直前まで確認しました。実際の送信は行っていません。`;
   } else {
-    notify('月次申請が完了しました', `${n}件の月次申請が完了しました。`);
-    message = `${n}件の月次申請が完了しました。`;
+    message = `${labels}の月次申請を提出しました（承認待ち）。`;
+    notify('月次申請が完了しました', message);
   }
   await setTerminalAutoProgress({ running: false, done: true, text: message });
   sendToPopup({ type: 'DONE', text: message });

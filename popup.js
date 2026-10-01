@@ -778,7 +778,8 @@ async function discoverTermStatus(isOnDomain) {
     const after = statusModel.confirmedMonthKeys(ledgerMonths);
     if (after.length !== before.length) {
       cache = Object.assign({}, cache, { months: ledgerMonths });
-      const currentMonth = cache.currentMonth || thisCalendarMonthKey();
+      // Today's month — the cache's scan month can lag and would prune newer history.
+      const currentMonth = thisCalendarMonthKey();
       let history = (await chrome.storage.local.get(TERM_HISTORY_KEY))[TERM_HISTORY_KEY];
       after.filter(month => before.indexOf(month) === -1).forEach(month => {
         history = statusModel.appendHistoryEvent(history, {
@@ -822,7 +823,7 @@ async function discoverTermStatus(isOnDomain) {
   // current month is confirmed there is nothing left for a CWS visit to discover.
   const confirmedMonths = statusModel ? statusModel.confirmedMonthKeys(cache && cache.months) : [];
   if (statusModel && !statusModel.termScanNeeded({
-    currentMonth: (cache && cache.currentMonth) || thisCalendarMonthKey(),
+    currentMonth: thisCalendarMonthKey(),
     months: cache && cache.months
   })) {
     const history = (await chrome.storage.local.get(TERM_HISTORY_KEY))[TERM_HISTORY_KEY];
@@ -869,13 +870,15 @@ async function discoverTermStatus(isOnDomain) {
   renderTermSection(cache, await loadTermRenderState(), history);
 }
 
-function isStaleRow(row, staleFallback) {
+// Per row: renderTermSection has already marked the rows the stale cache can't vouch for
+// (a recently observed or confirmed month is current regardless of the cache's age).
+function isStaleRow(row) {
   const model = globalThis.HRStatusModel;
   if (model && model.isConfirmedMonth(row)) return false;
-  return staleFallback || row.stale === true || row.staleFallback === true || row.fresh === false || row.source === 'stale';
+  return row.stale === true || row.staleFallback === true || row.fresh === false || row.source === 'stale';
 }
 
-function appendTermStatusRow(container, row, staleFallback) {
+function appendTermStatusRow(container, row) {
   const documentRef = container.ownerDocument;
   const model = globalThis.HRStatusModel;
   const confirmed = !!(model && model.isConfirmedMonth(row));
@@ -891,10 +894,11 @@ function appendTermStatusRow(container, row, staleFallback) {
   message.appendChild(documentRef.createTextNode(row.message));
   item.appendChild(message);
 
-  if (isStaleRow(row, staleFallback)) {
+  if (isStaleRow(row)) {
     const stale = documentRef.createElement('div');
     stale.className = 'term-stale';
-    stale.textContent = '前回確認時の情報です';
+    const at = row.observedAt ? historyTimestamp(row.observedAt) : '';
+    stale.textContent = at ? `${at} 時点の情報です` : '前回確認時の情報です';
     item.appendChild(stale);
   }
 
@@ -976,17 +980,24 @@ function renderTermSection(cache, renderState, history, failMsg) {
   if (!card) return;
   currentStatus.replaceChildren();
 
-  const current = (cache && cache.currentMonth) || thisCalendarMonthKey();
+  // 今月 is today's month — never the month of the last status scan, which lags (and
+  // would hide the current month and its history).
+  const current = thisCalendarMonthKey();
   const months = (cache && cache.months) || {};
   const model = globalThis.HRStatusModel;
   const staleFallback = !!failMsg || !isTermCacheFresh(cache);
-  const modelMonths = staleFallback && model && model.markMonthsStale ? model.markMonthsStale(months) : months;
-  const rows = model ? model.buildMonthRows(Object.assign({ currentMonth: current, months: modelMonths }, renderState || {})) : [];
-  rows.forEach(row => appendTermStatusRow(currentStatus, row, staleFallback));
+  const modelMonths = staleFallback && model && model.markMonthsStale
+    ? model.markMonthsStale(months, { now: Date.now(), freshForMs: TERM_CACHE_TTL_MS })
+    : months;
+  const currentMonthHours = (Array.isArray(history) ? history : [])
+    .filter(event => event && event.month === current && event.type === 'hours-complete')
+    .sort((left, right) => Number(right.at || 0) - Number(left.at || 0))[0] || null;
+  const rows = model ? model.buildMonthRows(Object.assign({ currentMonth: current, months: modelMonths, currentMonthHours }, renderState || {})) : [];
+  rows.forEach(row => appendTermStatusRow(currentStatus, row));
   renderTermHistory(history, current);
 
   card.style.display = 'block';
-  if (staleFallback) {
+  if (failMsg || rows.some(isStaleRow)) {
     status.style.display = 'block';
     status.textContent = failMsg || '前回の確認結果を表示しています。';
   } else if (!rows.length) {
