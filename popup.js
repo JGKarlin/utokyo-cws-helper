@@ -17,6 +17,11 @@ function setDefaultDates() {
 
 const CWS_MAIN_URL = 'https://ut-ppsweb.adm.u-tokyo.ac.jp/cws/cws';
 const CACHE_KEY = 'hrWorkdaysCacheV2';
+// 出勤/退勤 time config. Declared up here because the startup code restores it before
+// the time-config section below is reached (a later const would throw there, silently).
+const TERM_TIME_KEY = 'hrTermTimeConfig';
+const DEFAULT_ARRIVE = { earlyH: 8, earlyM: 45, lateH: 10, lateM: 0 };
+const DEFAULT_DEPART = { earlyH: 17, earlyM: 0, lateH: 19, lateM: 0 };
 
 // ── UTokyo network connection indicator ──────────────────────────────────────
 // The 就労管理システム is only reachable from within the UTokyo network (campus
@@ -349,10 +354,6 @@ document.querySelectorAll('input[name="mode"]').forEach(radio => {
 });
 
 // ── 出勤/退勤 time config (shared by 入力開始 and the 月次申請 submission) ──────────
-const TERM_TIME_KEY = 'hrTermTimeConfig';
-const DEFAULT_ARRIVE = { earlyH: 8, earlyM: 45, lateH: 10, lateM: 0 };
-const DEFAULT_DEPART = { earlyH: 17, earlyM: 0, lateH: 19, lateM: 0 };
-
 // Read the time config from the UI. Throws on an invalid manual range (via validateRange).
 function readTimeConfigFromUI() {
   const manual = document.getElementById('modeManual').checked;

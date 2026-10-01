@@ -178,7 +178,7 @@
 
 ## 技術仕様
 
-- **拡張機能バージョン：** 2.5.1
+- **拡張機能バージョン：** 2.5.2
 - **Manifest バージョン：** 3
 - **権限：** `activeTab`、`scripting`、`storage`、`tabs`、`alarms`、`notifications`、`sidePanel`、および `ut-ppsweb.adm.u-tokyo.ac.jp` へのホストアクセス
 - **UI：** サイドパネル（ツールバーアイコンで開く。`popup.html` / `popup.js` / `status-model.js`）
