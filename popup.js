@@ -259,17 +259,36 @@ async function getWorkdays(startDate, endDate, updateProgressFn) {
 }
 
 // ── Page detection (live: re-checks when you switch / navigate tabs) ──────────
+let isRunning = false;
+let isOnDomain = false;
+
+// The settings are CWS-only, but live progress + 停止 follow the automation — which keeps
+// running in its CWS tab (or a hidden background tab) when you switch to another tab.
+function applyPanelVisibility() {
+  const shown = (id) => document.getElementById(id).style.display === 'block';
+  const v = HRStatusModel.panelVisibility({
+    onDomain: isOnDomain,
+    running: isRunning,
+    hasResult: shown('errorBox') || shown('successBox'),
+    autoSubmit: !!document.getElementById('autoSubmitToggle').checked,
+  });
+  document.getElementById('automationUI').style.display = v.settings ? 'block' : 'none';
+  document.getElementById('liveStatusUI').style.display = v.live ? 'block' : 'none';
+  document.getElementById('notOnDomain').style.display = v.offDomainNotice ? 'block' : 'none';
+  document.getElementById('btnStart').style.display = v.startButton ? 'flex' : 'none';
+  document.getElementById('btnStop').style.display  = v.stopButton ? 'flex' : 'none';
+  // Collapse the (then empty) button row.
+  document.getElementById('btnGroup').style.display = v.buttonRow ? '' : 'none';
+}
+
 async function refreshOnDomainUI() {
   let url = '';
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     url = (tab && tab.url) || '';
   } catch (_) {}
-  const onDomain = url.includes('ut-ppsweb.adm.u-tokyo.ac.jp');
-  const auto = document.getElementById('automationUI');
-  const off = document.getElementById('notOnDomain');
-  if (auto) auto.style.display = onDomain ? 'block' : 'none';
-  if (off) off.style.display = onDomain ? 'none' : 'block';
+  isOnDomain = url.includes('ut-ppsweb.adm.u-tokyo.ac.jp');
+  applyPanelVisibility();
 }
 
 (async () => {
@@ -383,11 +402,13 @@ function getInt(id) {
   return parseInt(document.getElementById(id).value, 10) || 0;
 }
 
+// A result (完了 / エラー) keeps the live area visible off-domain, so re-apply visibility.
 function showError(msg) {
   const box = document.getElementById('errorBox');
   box.textContent = msg;
   box.style.display = 'block';
   document.getElementById('successBox').style.display = 'none';
+  applyPanelVisibility();
 }
 
 function showSuccess(msg) {
@@ -395,23 +416,20 @@ function showSuccess(msg) {
   box.textContent = msg;
   box.style.display = 'block';
   document.getElementById('errorBox').style.display = 'none';
+  applyPanelVisibility();
 }
 
 function clearMessages() {
   document.getElementById('errorBox').style.display = 'none';
   document.getElementById('successBox').style.display = 'none';
+  applyPanelVisibility();
 }
 
-let isRunning = false;
+// 入力開始 is a manual-entry action — hidden when fully automatic or off a CWS page;
+// 停止 shows only while running (on any tab).
 function setRunning(running) {
   isRunning = running;
-  const auto = !!document.getElementById('autoSubmitToggle').checked;
-  // 入力開始 is a manual-entry action — hidden when fully automatic; 停止 only while running.
-  document.getElementById('btnStart').style.display = (running || auto) ? 'none' : 'flex';
-  document.getElementById('btnStop').style.display  = running ? 'flex' : 'none';
-  // Collapse the (now empty) button row when fully automatic and idle.
-  const group = document.getElementById('btnGroup');
-  if (group) group.style.display = (running || !auto) ? '' : 'none';
+  applyPanelVisibility();
 }
 
 // When 毎月自動で申請する is on, the manual hours-entry controls (出退勤設定・時刻範囲・
@@ -531,12 +549,16 @@ document.getElementById('btnStart').addEventListener('click', () => startEntry()
 
 // ── Stop automation ──────────────────────────────────────────────────────────
 document.getElementById('btnStop').addEventListener('click', async () => {
+  // The run may be in a CWS tab that is not in front (or a hidden background tab), so
+  // stop every CWS tab rather than only the active one…
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab) await chrome.tabs.sendMessage(tab.id, { type: 'STOP' });
+    const tabs = await chrome.tabs.query({ url: 'https://ut-ppsweb.adm.u-tokyo.ac.jp/*' });
+    await Promise.all(tabs.map(t => chrome.tabs.sendMessage(t.id, { type: 'STOP' }).catch(() => {})));
   } catch { /* ignore */ }
 
-  chrome.storage.session.remove('hrAutoProgress');
+  // …and clear the run state directly too, in case no live content script answered
+  // (e.g. an orphaned tab after an extension reload) — same keys as content.js STOP.
+  chrome.storage.session.remove(['hrAutoState', 'hrSubmitState', 'hrTermScan', 'hrAutoProgress']);
   setRunning(false);
   updateProgress('停止しました', 0);
   document.getElementById('statusPercent').textContent = '';

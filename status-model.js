@@ -459,6 +459,25 @@
     return null;
   }
 
+  // Side-panel section visibility. The settings are CWS-only, but live progress + 停止
+  // follow the automation, which may be running in a CWS tab that is not in front (or a
+  // hidden background tab) — so they stay visible while running, and afterwards while a
+  // result (完了 / エラー) is still on screen.
+  function panelVisibility(options) {
+    const value = options || {};
+    const onDomain = !!value.onDomain;
+    const running = !!value.running;
+    const startButton = onDomain && !running && !value.autoSubmit;
+    return {
+      settings: onDomain,
+      live: onDomain || running || !!value.hasResult,
+      offDomainNotice: !onDomain && !running,
+      startButton,
+      stopButton: running,
+      buttonRow: startButton || running
+    };
+  }
+
   function chooseReusableCwsTab(trackedTabId, tabs) {
     const cwsTabs = (Array.isArray(tabs) ? tabs : []).filter(tab =>
       tab && Number.isInteger(tab.id) &&
@@ -486,6 +505,7 @@
     planCwsScanLock,
     backgroundAutomationTimeoutMs,
     chooseReusableCwsTab,
+    panelVisibility,
     monthlySubmissionAlreadyHandled,
     terminalEntryProgress,
     historyMessageBody,

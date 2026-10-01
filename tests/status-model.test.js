@@ -1,9 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-let buildMonthRows, statusEventsFromSnapshot, appendHistoryEvent, markMonthsStale, classifyBackgroundOutcome, planBackgroundRun, shouldClearBackgroundAction, cwsAutomationActive, cwsScanActive, shouldRunStatusScan, cwsAutomationStartupCleanupKeys, planCwsScanLock, backgroundAutomationTimeoutMs, chooseReusableCwsTab, monthlySubmissionAlreadyHandled, terminalEntryProgress, historyMessageBody, confirmMonths, isConfirmedMonth, confirmedMonthKeys, termScanShouldStop, termScanNeeded;
+let buildMonthRows, statusEventsFromSnapshot, appendHistoryEvent, markMonthsStale, classifyBackgroundOutcome, planBackgroundRun, shouldClearBackgroundAction, cwsAutomationActive, cwsScanActive, shouldRunStatusScan, cwsAutomationStartupCleanupKeys, planCwsScanLock, backgroundAutomationTimeoutMs, chooseReusableCwsTab, monthlySubmissionAlreadyHandled, terminalEntryProgress, historyMessageBody, confirmMonths, isConfirmedMonth, confirmedMonthKeys, termScanShouldStop, termScanNeeded, panelVisibility;
 try {
-  ({ buildMonthRows, statusEventsFromSnapshot, appendHistoryEvent, markMonthsStale, classifyBackgroundOutcome, planBackgroundRun, shouldClearBackgroundAction, cwsAutomationActive, cwsScanActive, shouldRunStatusScan, cwsAutomationStartupCleanupKeys, planCwsScanLock, backgroundAutomationTimeoutMs, chooseReusableCwsTab, monthlySubmissionAlreadyHandled, terminalEntryProgress, historyMessageBody, confirmMonths, isConfirmedMonth, confirmedMonthKeys, termScanShouldStop, termScanNeeded } = require('../status-model.js'));
+  ({ buildMonthRows, statusEventsFromSnapshot, appendHistoryEvent, markMonthsStale, classifyBackgroundOutcome, planBackgroundRun, shouldClearBackgroundAction, cwsAutomationActive, cwsScanActive, shouldRunStatusScan, cwsAutomationStartupCleanupKeys, planCwsScanLock, backgroundAutomationTimeoutMs, chooseReusableCwsTab, monthlySubmissionAlreadyHandled, terminalEntryProgress, historyMessageBody, confirmMonths, isConfirmedMonth, confirmedMonthKeys, termScanShouldStop, termScanNeeded, panelVisibility } = require('../status-model.js'));
 } catch (_) {}
 
 test('renders a stored completion message with exactly one month label', () => {
@@ -471,4 +471,28 @@ test('strips a tagged month label from a stored history message', () => {
     historyMessageBody('2026-09', '2026年9月分（今月・進行中）：自動申請の準備ができました。'),
     '自動申請の準備ができました。'
   );
+});
+
+test('keeps live progress and 停止 visible while automation runs in a non-active tab', () => {
+  assert.equal(typeof panelVisibility, 'function');
+  // Running on another tab (e.g. the VPN login tab is in front): progress + stop stay up.
+  assert.deepEqual(panelVisibility({ onDomain: false, running: true, hasResult: false, autoSubmit: true }), {
+    settings: false, live: true, offDomainNotice: false, startButton: false, stopButton: true, buttonRow: true
+  });
+  // Finished while away: the result stays readable, with the open-CWS notice beside it.
+  assert.deepEqual(panelVisibility({ onDomain: false, running: false, hasResult: true, autoSubmit: false }), {
+    settings: false, live: true, offDomainNotice: true, startButton: false, stopButton: false, buttonRow: false
+  });
+  // Idle off-domain: only the notice.
+  assert.deepEqual(panelVisibility({ onDomain: false, running: false, hasResult: false, autoSubmit: false }), {
+    settings: false, live: false, offDomainNotice: true, startButton: false, stopButton: false, buttonRow: false
+  });
+  // On a CWS page, idle, manual mode: everything incl. 入力開始.
+  assert.deepEqual(panelVisibility({ onDomain: true, running: false, hasResult: false, autoSubmit: false }), {
+    settings: true, live: true, offDomainNotice: false, startButton: true, stopButton: false, buttonRow: true
+  });
+  // On a CWS page, idle, 毎月自動で申請する: no 入力開始, empty button row collapsed.
+  assert.deepEqual(panelVisibility({ onDomain: true, running: false, hasResult: false, autoSubmit: true }), {
+    settings: true, live: true, offDomainNotice: false, startButton: false, stopButton: false, buttonRow: false
+  });
 });
