@@ -124,18 +124,15 @@ function isTransientMessageChannelError(err) {
 
 async function prepareWorkdayScanTab(tabId, updateProgressFn) {
   const deadline = Date.now() + 60000;
-  let attempt = 0;
 
   while (Date.now() < deadline) {
-    attempt += 1;
     const prep = await sendMessageWithRetry(tabId, { type: 'PREPARE_WORKDAY_SCAN' }, 15000);
 
     if (prep && prep.ready) return;
     if (prep && prep.error) throw new Error(prep.error);
 
     const step = prep && prep.step ? prep.step : '勤務表へ移動中...';
-    const percent = Math.min(35, 5 + attempt * 2);
-    updateProgressFn(step, percent);
+    updateProgressFn(step, null);
 
     const topLevelNavigation =
       step.includes('就労管理ページへ移動中') ||
@@ -168,8 +165,7 @@ async function fetchWorkdaysForMonth(tabId, monthKey, index, total, updateProgre
     }
     attempt += 1;
 
-    const percent = total <= 1 ? 50 : Math.round(40 + (50 * index / total));
-    updateProgressFn(`${label}の勤務表で対象勤務日を確認中 (${index}/${total})`, percent);
+    updateProgressFn(`${label}の勤務表で対象勤務日を確認中 (${index}/${total})`, null);
 
     try {
       const res = await sendMessageWithRetry(
@@ -183,7 +179,7 @@ async function fetchWorkdaysForMonth(tabId, monthKey, index, total, updateProgre
       }
       if (Array.isArray(res && res.dates)) return res.dates;
       if (res && res.navigating) {
-        updateProgressFn(res.step || `${label}の勤務表へ移動中...`, percent);
+        updateProgressFn(res.step || `${label}の勤務表へ移動中...`, null);
         await delay(res.waitMs || 1200);
         continue;
       }
@@ -219,7 +215,7 @@ async function getWorkdays(startDate, endDate, updateProgressFn) {
   const missing = months.filter(m => !cache[m] || !Array.isArray(cache[m]));
 
   if (missing.length > 0) {
-    updateProgressFn('勤務表で対象勤務日を確認中...', 5);
+    updateProgressFn('勤務表で対象勤務日を確認中...', null);
     await chrome.storage.session.set({ hrScanActive: true, hrScanStartedAt: Date.now() });
     let tabId = null;
     try {
@@ -246,7 +242,7 @@ async function getWorkdays(startDate, endDate, updateProgressFn) {
       await chrome.storage.session.remove(['hrScanActive', 'hrScanStartedAt']);
     }
   } else {
-    updateProgressFn('キャッシュを確認中...', 2);
+    updateProgressFn('キャッシュを確認中...', null);
   }
 
   const finalCache = cache;
@@ -443,8 +439,11 @@ function applyAutoSubmitUI() {
   setRunning(isRunning); // re-apply button visibility for the new mode
 }
 
+// Only the month's entry progress is a percentage: a step with percent null (navigation,
+// verification, submission…) updates the text and leaves the bar where it is.
 function updateProgress(text, percent) {
-  document.getElementById('statusText').textContent    = text;
+  document.getElementById('statusText').textContent = text;
+  if (typeof percent !== 'number') return;
   document.getElementById('progressBar').value         = percent;
   document.getElementById('statusPercent').textContent = percent > 0 ? `${percent}%` : '';
 }

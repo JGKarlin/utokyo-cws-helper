@@ -32,7 +32,8 @@ function loadPopup(localData, options = {}) {
   // The radio defaults from popup.html.
   element('modeAuto').checked = true;
 
-  const event = { addListener() {} };
+  const listeners = options.listeners || {};
+  const event = (name) => ({ addListener(fn) { (listeners[name] = listeners[name] || []).push(fn); } });
   const area = (data) => ({
     get: (keys, cb) => {
       const list = keys == null ? Object.keys(data) : [].concat(keys);
@@ -45,9 +46,9 @@ function loadPopup(localData, options = {}) {
     remove: async () => {},
   });
   const chrome = {
-    storage: { local: area(localData), session: area({}), onChanged: event },
-    tabs: { query: async () => [], onActivated: event, onUpdated: event },
-    runtime: { onMessage: event, sendMessage: async () => {} },
+    storage: { local: area(localData), session: area({}), onChanged: event('storage') },
+    tabs: { query: async () => [], onActivated: event('tabActivated'), onUpdated: event('tabUpdated') },
+    runtime: { onMessage: event('message'), sendMessage: async () => {} },
   };
   const now = options.now;
   const FixedDate = now == null ? Date : class extends Date {
@@ -146,4 +147,29 @@ test('says when an older row was last observed', async () => {
   const rows = renderedLines(el('termCurrentStatus'));
   assert.match(rows[0], /^2026年9月分（前月・承認待ち）：提出済み（承認待ち）/);
   assert.match(rows[0], /10\/2 00:40 時点の情報です$/);
+});
+
+test('a text-only step leaves the entry percentage where it is', async () => {
+  const listeners = {};
+  const el = loadPopup({}, { listeners });
+  await settle();
+  const post = (msg) => listeners.message.forEach(fn => fn(msg));
+
+  post({ type: 'PROGRESS', text: '自己申告記録（退勤）：2026-10-30（62/63）', percent: 98 });
+  post({ type: 'PROGRESS', text: '2026年10月分：勤務表へ移動中...', percent: null });
+  assert.equal(el('statusText').textContent, '2026年10月分：勤務表へ移動中...');
+  assert.equal(el('progressBar').value, 98);
+  assert.equal(el('statusPercent').textContent, '98%');
+
+  post({ type: 'PROGRESS', text: '2026年10月分：勤務時間の入力が完了しました。勤務表で入力結果を確認中...', percent: 100 });
+  post({ type: 'PROGRESS', text: '2026年10月分：前月の承認状況を確認中...', percent: null });
+  assert.equal(el('progressBar').value, 100);
+  assert.equal(el('statusPercent').textContent, '100%');
+});
+
+test('the panel workday scan steps are text-only', () => {
+  const popup = fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8');
+  const calls = popup.match(/updateProgressFn\([^;]*\);/g) || [];
+  assert.ok(calls.length >= 4);
+  calls.forEach(call => assert.match(call, /, null\);$/, call));
 });

@@ -495,6 +495,15 @@
     return null;
   }
 
+  // Only the month's entry progress is a percentage. Every other step (navigation,
+  // workday scan, approval check, submission) is text-only: it keeps the percentage this
+  // run last reported, or shows none if nothing has been measured yet.
+  function stepProgressRecord(previous, text) {
+    const percent = previous && previous.running && typeof previous.percent === 'number'
+      ? previous.percent : null;
+    return { running: true, text, percent };
+  }
+
   // Side-panel section visibility. The settings are CWS-only, but live progress + 停止
   // follow the automation, which may be running in a CWS tab that is not in front (or a
   // hidden background tab) — so they stay visible while running, and afterwards while a
@@ -542,6 +551,7 @@
     backgroundAutomationTimeoutMs,
     chooseReusableCwsTab,
     panelVisibility,
+    stepProgressRecord,
     monthlySubmissionAlreadyHandled,
     terminalEntryProgress,
     historyMessageBody,

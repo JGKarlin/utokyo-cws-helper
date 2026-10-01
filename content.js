@@ -40,6 +40,17 @@ function sendProgress(text, percent) {
   safeSessionSet({ hrAutoProgress: { running: true, text, percent } });
 }
 
+// A text-only step (navigation, workday scan, approval check, submission): keeps the
+// entry percentage this run last reported — only entry progress is a percentage.
+async function sendStepProgress(text) {
+  if (!extensionAlive()) return;
+  let previous = null;
+  try { previous = (await chrome.storage.session.get('hrAutoProgress')).hrAutoProgress; } catch (_) {}
+  const record = globalThis.HRStatusModel.stepProgressRecord(previous, text);
+  sendToPopup({ type: 'PROGRESS', text, percent: record.percent });
+  try { await chrome.storage.session.set({ hrAutoProgress: record }); } catch (_) {}
+}
+
 function sendDone(text, details) {
   sendToPopup({ type: 'DONE', text });
   safeSessionSet({ hrAutoProgress: Object.assign({ running: false, done: true, text }, details || {}) });
@@ -542,8 +553,7 @@ async function runStateMachine() {
             await chrome.storage.session.set({
               hrSubmitState: { ...pendingSubmit, phase: 'submit-nav' }
             });
-            sendProgress(`${formatMonthLabel(pendingSubmit.targetMonth)}：入力結果を勤務表で再確認中...`,
-              pendingSubmit.entryOnly ? 99 : submitPercent(pendingSubmit, 60));
+            sendProgress(`${formatMonthLabel(pendingSubmit.targetMonth)}：勤務時間の入力が完了しました。勤務表で入力結果を確認中...`, 100);
             clickReturnLink();
           } else {
             const uniqueDays = new Set(state.dates).size;
@@ -920,13 +930,12 @@ async function scanWorkdaysForMonths(months) {
   for (let i = 0; i < total; i++) {
     const monthKey = months[i];
     const label = formatMonthLabel(monthKey);
-    const percent = total <= 1 ? 50 : Math.round(15 + (75 * (i + 1) / total));
-    sendProgress(`${label}の本人用実績入力で対象期間を表示し、勤務表の平日を確認中 (${i + 1}/${total})`, percent);
+    await sendStepProgress(`${label}の本人用実績入力で対象期間を表示し、勤務表の平日を確認中 (${i + 1}/${total})`);
 
     const dates = await loadMonthForWorkdays(monthKey);
     result[monthKey] = dates;
   }
-  sendProgress('本人用実績入力での勤務表の平日確認が完了しました', 95);
+  await sendStepProgress('本人用実績入力での勤務表の平日確認が完了しました');
   return result;
 }
 
@@ -1299,11 +1308,6 @@ async function termScanStep(confirmedMonths) {
 
 // ── Submission state machine (persistent, parallel to clockin/clockout) ─────────
 function labelOf(sub) { return formatMonthLabel(sub.targetMonth); }
-function submitPercent(sub, intra) {
-  const total = (sub.queue && sub.queue.length) || 1;
-  const done = sub.queueIndex || 0;
-  return Math.min(99, Math.round(((done + intra / 100) / total) * 100));
-}
 async function updateSubmit(sub, patch) {
   const next = { ...sub, ...patch };
   await chrome.storage.session.set({ hrSubmitState: next });
@@ -1410,7 +1414,7 @@ async function advanceSubmitQueue(sub, submitted, dryRun) {
   if (nextIndex < sub.queue.length) {
     const nextMonth = sub.queue[nextIndex];
     const next = await updateSubmit(sub, { queueIndex: nextIndex, targetMonth: nextMonth, phase: 'submit-ensure-month', navStep: null });
-    sendProgress(`次の対象月（${formatMonthLabel(nextMonth)}）を処理します...`, submitPercent(next, 0));
+    await sendStepProgress(`次の対象月（${formatMonthLabel(nextMonth)}）を処理します...`);
     return runSubmitStateMachine(next);
   }
   // Name the months — "1件の…" doesn't say which month was just submitted.
@@ -1435,7 +1439,7 @@ async function runSubmitStateMachine(sub) {
           const next = await updateSubmit(sub, { phase: 'submit-ensure-month' });
           return runSubmitStateMachine(next);
         }
-        sendProgress(`${labelOf(sub)}：勤務表へ移動中...`, submitPercent(sub, 4));
+        await sendStepProgress(`${labelOf(sub)}：勤務表へ移動中...`);
         return; // navigation in flight; re-enter on next page load
       }
 
@@ -1458,7 +1462,7 @@ async function runSubmitStateMachine(sub) {
         const btn = goBack ? getTermEl('TOPRVTM') : getTermEl('TONXTTM');
         if (!btn) return sendRetryableSubmitError(sub, '月移動ボタンが見つかりません');
         await updateSubmit(sub, { navStep: { count: count + 1 } });
-        sendProgress(`${labelOf(sub)}：対象月へ移動中...（現在 ${formatMonthLabel(cur)}）`, submitPercent(sub, 8));
+        await sendStepProgress(`${labelOf(sub)}：対象月へ移動中...（現在 ${formatMonthLabel(cur)}）`);
         activateElement(btn); // full reload → re-enter
         return;
       }
@@ -1499,6 +1503,7 @@ async function runSubmitStateMachine(sub) {
             return sendTerminalSubmitDone(message);
           }
           // Hours done. Verify the previous period is approved before submitting (unless already checked).
+          sendProgress(`${labelOf(sub)}：勤務時間の入力完了を確認しました。`, 100);
           const next = await updateSubmit(sub, { phase: sub.prechecked ? 'submit-click' : 'submit-precheck' });
           return runSubmitStateMachine(next);
         }
@@ -1539,7 +1544,7 @@ async function runSubmitStateMachine(sub) {
         if (result.error) return sendRetryableSubmitError(sub, result.error);
         const dates = result.dates;
         const message = scheduledWorkdaysMessage(target, dates);
-        sendProgress(message, submitPercent(sub, 10));
+        await sendStepProgress(message);
         emitTermHistoryEvent(target, 'workdays-determined-full-month', 'workdays-determined', message);
         const wbm = { ...(sub.workdaysByMonth || {}), [target]: dates };
         return runSubmitStateMachine(await updateSubmit(sub, { phase: 'submit-check-hours', workdaysByMonth: wbm }));
@@ -1555,7 +1560,7 @@ async function runSubmitStateMachine(sub) {
         const btn = getTermEl('TOPRVTM');
         if (!btn) return sendRetryableSubmitError(sub, '前月へ移動できませんでした');
         await updateSubmit(sub, { phase: 'submit-precheck-read', prevMonth, navStep: { count: 0 } });
-        sendProgress(`${labelOf(sub)}：前月（${formatMonthLabel(prevMonth)}）の承認状況を確認中...`, submitPercent(sub, 70));
+        await sendStepProgress(`${labelOf(sub)}：前月（${formatMonthLabel(prevMonth)}）の承認状況を確認中...`);
         activateElement(btn); // full reload → re-enter on submit-precheck-read
         return;
       }
@@ -1594,10 +1599,10 @@ async function runSubmitStateMachine(sub) {
         if (!btn) return sendTerminalSubmitError(sub, '月次申請ボタンが見つかりません');
         if (TERM_SUBMIT_DRY_RUN) {
           console.log('[HR Term Submit] DRY-RUN: would click 月次申請 for', sub.targetMonth);
-          sendProgress(`（テスト実行）${labelOf(sub)} の月次申請手前まで確認しました（未送信）。`, submitPercent(sub, 90));
+          await sendStepProgress(`（テスト実行）${labelOf(sub)} の月次申請手前まで確認しました（未送信）。`);
           return advanceSubmitQueue(sub, false, true);
         }
-        sendProgress(`${labelOf(sub)}：月次申請を送信中...`, submitPercent(sub, 85));
+        await sendStepProgress(`${labelOf(sub)}：月次申請を送信中...`);
         await updateSubmit(sub, { phase: 'submit-confirm' });
         activateElement(btn); // onclick → PreparePersonalTermSubmissionAction → form.submit() (full reload)
         return;
@@ -1612,7 +1617,7 @@ async function runSubmitStateMachine(sub) {
         if (isTermConfirmPage()) {
           const confirmBtn = findTermConfirmButton();
           if (confirmBtn) {
-            sendProgress(`${labelOf(sub)}：申請内容を確定中...`, submitPercent(sub, 92));
+            await sendStepProgress(`${labelOf(sub)}：申請内容を確定中...`);
             await updateSubmit(sub, { phase: 'submit-success' });
             activateElement(confirmBtn); // → ExecutePersonalTermSubmissionAction → commit (full reload)
             return;
@@ -1628,7 +1633,7 @@ async function runSubmitStateMachine(sub) {
         if (detectTermSubmissionSuccess(sub.targetMonth)) {
           return advanceSubmitQueue(sub, true, false);
         }
-        sendProgress(`${labelOf(sub)}：申請結果を確認中...`, submitPercent(sub, 95));
+        await sendStepProgress(`${labelOf(sub)}：申請結果を確認中...`);
         await updateSubmit(sub, { phase: 'submit-success-wait' });
         return;
       }
@@ -1711,7 +1716,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     };
     chrome.storage.session.set({ hrSubmitState: sub });
     if (sub.targetMonth) {
-      sendProgress(`${formatMonthLabel(sub.targetMonth)} の月次申請を開始します...`, 2);
+      sendStepProgress(`${formatMonthLabel(sub.targetMonth)} の月次申請を開始します...`);
     }
     runStateMachine();
     sendResponse({ ok: true });

@@ -1,9 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-let buildMonthRows, statusEventsFromSnapshot, appendHistoryEvent, markMonthsStale, classifyBackgroundOutcome, planBackgroundRun, shouldClearBackgroundAction, cwsAutomationActive, cwsScanActive, shouldRunStatusScan, cwsAutomationStartupCleanupKeys, planCwsScanLock, backgroundAutomationTimeoutMs, chooseReusableCwsTab, monthlySubmissionAlreadyHandled, terminalEntryProgress, historyMessageBody, confirmMonths, isConfirmedMonth, confirmedMonthKeys, termScanShouldStop, termScanNeeded, panelVisibility;
+let buildMonthRows, statusEventsFromSnapshot, appendHistoryEvent, markMonthsStale, classifyBackgroundOutcome, planBackgroundRun, shouldClearBackgroundAction, cwsAutomationActive, cwsScanActive, shouldRunStatusScan, cwsAutomationStartupCleanupKeys, planCwsScanLock, backgroundAutomationTimeoutMs, chooseReusableCwsTab, monthlySubmissionAlreadyHandled, terminalEntryProgress, historyMessageBody, confirmMonths, isConfirmedMonth, confirmedMonthKeys, termScanShouldStop, termScanNeeded, panelVisibility, stepProgressRecord;
 try {
-  ({ buildMonthRows, statusEventsFromSnapshot, appendHistoryEvent, markMonthsStale, classifyBackgroundOutcome, planBackgroundRun, shouldClearBackgroundAction, cwsAutomationActive, cwsScanActive, shouldRunStatusScan, cwsAutomationStartupCleanupKeys, planCwsScanLock, backgroundAutomationTimeoutMs, chooseReusableCwsTab, monthlySubmissionAlreadyHandled, terminalEntryProgress, historyMessageBody, confirmMonths, isConfirmedMonth, confirmedMonthKeys, termScanShouldStop, termScanNeeded, panelVisibility } = require('../status-model.js'));
+  ({ buildMonthRows, statusEventsFromSnapshot, appendHistoryEvent, markMonthsStale, classifyBackgroundOutcome, planBackgroundRun, shouldClearBackgroundAction, cwsAutomationActive, cwsScanActive, shouldRunStatusScan, cwsAutomationStartupCleanupKeys, planCwsScanLock, backgroundAutomationTimeoutMs, chooseReusableCwsTab, monthlySubmissionAlreadyHandled, terminalEntryProgress, historyMessageBody, confirmMonths, isConfirmedMonth, confirmedMonthKeys, termScanShouldStop, termScanNeeded, panelVisibility, stepProgressRecord } = require('../status-model.js'));
 } catch (_) {}
 
 test('renders a stored completion message with exactly one month label', () => {
@@ -541,4 +541,15 @@ test('does not mark a month stale when it was observed recently', () => {
   assert.equal(marked['2026-06'].stale, true);
   // Without a clock, every unconfirmed month is stale as before.
   assert.equal(markMonthsStale(months)['2026-09'].stale, true);
+});
+
+test('a step message keeps the entry percentage instead of measuring itself', () => {
+  assert.equal(typeof stepProgressRecord, 'function');
+  assert.deepEqual(stepProgressRecord({ running: true, text: '…（62/63）', percent: 98 }, '勤務表へ移動中...'),
+    { running: true, text: '勤務表へ移動中...', percent: 98 });
+  assert.deepEqual(stepProgressRecord({ running: true, text: '入力完了', percent: 100 }, '申請結果を確認中...'),
+    { running: true, text: '申請結果を確認中...', percent: 100 });
+  // Nothing measured yet in this run (or the last run is over): no percentage at all.
+  assert.deepEqual(stepProgressRecord(undefined, '勤務表へ移動中...'), { running: true, text: '勤務表へ移動中...', percent: null });
+  assert.deepEqual(stepProgressRecord({ running: false, done: true, text: '完了' }, 'x'), { running: true, text: 'x', percent: null });
 });

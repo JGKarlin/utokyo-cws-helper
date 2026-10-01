@@ -38,9 +38,23 @@ test('plans the current-month entry run against the whole month, not just the re
   assert.match(content.slice(start, end), /plannedEntryProgress\(state\)/);
 });
 
-test('keeps an entry-only run at the end of the month scale while it re-verifies', () => {
-  // After the last entry (~98%), the re-check must not drop back to the submission scale's 60%.
-  assert.match(content, /pendingSubmit\.entryOnly \? 99 : submitPercent\(pendingSubmit, 60\)/);
+test('shows 100% with a verification message once the month entry is complete', () => {
+  assert.match(content, /sendProgress\(`\$\{formatMonthLabel\(pendingSubmit\.targetMonth\)\}：勤務時間の入力が完了しました。勤務表で入力結果を確認中\.\.\.`, 100\)/);
+  // A submission run whose hours were already complete starts its later steps at 100% too.
+  assert.match(content, /sendProgress\(`\$\{labelOf\(sub\)\}：勤務時間の入力完了を確認しました。`, 100\)/);
+});
+
+test('expresses only the month entry progress as a percentage', () => {
+  // Navigation, workday scans, approval checks and submission steps are text-only.
+  assert.doesNotMatch(content, /submitPercent/);
+  const scan = content.slice(content.indexOf('async function scanWorkdaysForMonths'));
+  assert.doesNotMatch(scan.slice(0, scan.indexOf('\n}\n')), /sendProgress\(/);
+  for (const step of ['：勤務表へ移動中', '：対象月へ移動中', 'の承認状況を確認中', '：月次申請を送信中', '：申請内容を確定中', '：申請結果を確認中']) {
+    const at = content.indexOf(step);
+    assert.notEqual(at, -1, step);
+    const line = content.slice(content.lastIndexOf('\n', at), content.indexOf('\n', at));
+    assert.match(line, /await sendStepProgress\(/, step);
+  }
 });
 
 test('names the submitted months in the completion message and notification', () => {
