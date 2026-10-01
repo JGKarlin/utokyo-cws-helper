@@ -412,7 +412,8 @@ function phaseOffset(state) {
 }
 function calcProgress(state) {
   if (Array.isArray(state.taskPhases)) {
-    return Math.round(((state.dateIndex || 0) / Math.max(1, state.dates.length)) * 100);
+    // Measured against the whole month, so a resumed run continues where it left off.
+    return globalThis.HRTermHours.plannedEntryProgress(state).percent;
   }
   const totalEntries = state.dates.length * ENTRIES_PER_DAY;
   const completed = (state.dateIndex * ENTRIES_PER_DAY) + phaseOffset(state);
@@ -424,9 +425,12 @@ function progressText(state) {
     : state.phase === 'clockout' ? '自己申告記録（退勤）'
     : '勤務外時間数（休憩）';
   const dateStr = state.dates[state.dateIndex];
-  const planned = Array.isArray(state.taskPhases);
-  const current = planned ? state.dateIndex + 1 : (state.dateIndex * ENTRIES_PER_DAY) + phaseOffset(state) + 1;
-  const total = planned ? state.dates.length : state.dates.length * ENTRIES_PER_DAY;
+  if (Array.isArray(state.taskPhases)) {
+    const { current, total } = globalThis.HRTermHours.plannedEntryProgress(state);
+    return `${phaseLabel}：${dateStr}（${current}/${total}）`;
+  }
+  const current = (state.dateIndex * ENTRIES_PER_DAY) + phaseOffset(state) + 1;
+  const total = state.dates.length * ENTRIES_PER_DAY;
   return `${phaseLabel}：${dateStr}（${current}/${total}）`;
 }
 
@@ -538,7 +542,8 @@ async function runStateMachine() {
             await chrome.storage.session.set({
               hrSubmitState: { ...pendingSubmit, phase: 'submit-nav' }
             });
-            sendProgress(`${formatMonthLabel(pendingSubmit.targetMonth)}：入力結果を勤務表で再確認中...`, submitPercent(pendingSubmit, 60));
+            sendProgress(`${formatMonthLabel(pendingSubmit.targetMonth)}：入力結果を勤務表で再確認中...`,
+              pendingSubmit.entryOnly ? 99 : submitPercent(pendingSubmit, 60));
             clickReturnLink();
           } else {
             const uniqueDays = new Set(state.dates).size;
@@ -1113,7 +1118,10 @@ function detectHoursComplete(workdays) {
   }
   const tasks = hoursModel.planMissingEntries(workdays, rowFacts);
   const missing = Array.from(new Set(tasks.map(task => task.date)));
-  return { complete: tasks.length === 0, missing, tasks };
+  return {
+    complete: tasks.length === 0, missing, tasks,
+    monthEntries: hoursModel.countMonthEntries(workdays, rowFacts),
+  };
 }
 
 // Read a month's approval status from the 【処理状況】 table (located by its header
@@ -1493,17 +1501,17 @@ async function runSubmitStateMachine(sub) {
           const next = await updateSubmit(sub, { phase: sub.prechecked ? 'submit-click' : 'submit-precheck' });
           return runSubmitStateMachine(next);
         }
-        sendProgress(`${labelOf(sub)}：未入力の勤務時間（${res.missing.length}日分）を入力します...`, submitPercent(sub, 15));
         const tasks = res.tasks || [];
-        await chrome.storage.session.set({
-          hrAutoState: {
-            phase: tasks[0].phase,
-            dates: tasks.map(task => task.date),
-            taskPhases: tasks.map(task => task.phase),
-            dateIndex: 0,
-            config: sub.config
-          }
-        });
+        const entryState = {
+          phase: tasks[0].phase,
+          dates: tasks.map(task => task.date),
+          taskPhases: tasks.map(task => task.phase),
+          dateIndex: 0,
+          monthEntries: res.monthEntries,
+          config: sub.config
+        };
+        sendProgress(`${labelOf(sub)}：未入力の勤務時間（${res.missing.length}日分）を入力します...`, calcProgress(entryState));
+        await chrome.storage.session.set({ hrAutoState: entryState });
         await updateSubmit(sub, { phase: 'submit-entering' });
         navigateToApplicationMenu(); // hand off to the existing clockin/clockout machine
         return;

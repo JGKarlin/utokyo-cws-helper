@@ -29,3 +29,16 @@ test('records a verified current-month completion when the live work table is ob
   const observer = content.slice(start, end);
   assert.doesNotMatch(observer, /hrSubmitState|hrAutoState|hrScanActive|hrAutoEntryEnabled/);
 });
+
+test('plans the current-month entry run against the whole month, not just the remaining days', () => {
+  assert.match(content, /monthEntries: hoursModel\.countMonthEntries\(workdays, rowFacts\)/);
+  assert.match(content, /monthEntries: res\.monthEntries/);
+  const start = content.indexOf('function calcProgress');
+  const end = content.indexOf('// ── Advance State', start);
+  assert.match(content.slice(start, end), /plannedEntryProgress\(state\)/);
+});
+
+test('keeps an entry-only run at the end of the month scale while it re-verifies', () => {
+  // After the last entry (~98%), the re-check must not drop back to the submission scale's 60%.
+  assert.match(content, /pendingSubmit\.entryOnly \? 99 : submitPercent\(pendingSubmit, 60\)/);
+});

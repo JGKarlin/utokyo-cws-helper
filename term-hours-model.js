@@ -68,6 +68,29 @@
     return Array.from(new Set(planMissingEntries(workdays, rowFacts).map(task => task.date)));
   }
 
+  // Every entry the month needs (出勤・退勤・休憩 per workday, full-day paid leave
+  // excluded), filled or not — the fixed 100% that progress is measured against.
+  function countMonthEntries(workdays, rowFacts) {
+    const byDay = factsByDay(rowFacts);
+    let days = 0;
+    (Array.isArray(workdays) ? workdays : []).forEach(workday => {
+      const day = dayFromWorkday(String(workday || ''));
+      const facts = day === null ? [] : (byDay.get(day) || []);
+      if (!facts.some(fact => isFullDayPaidLeave(fact.rowText))) days += 1;
+    });
+    return days * 3;
+  }
+
+  // Progress of a planned (missing-entries-only) run across the whole month, so a resumed
+  // run continues from the entries already done instead of restarting at 0%. A plan made
+  // without monthEntries counts its own tasks.
+  function plannedEntryProgress(state) {
+    const tasks = (state && Array.isArray(state.taskPhases)) ? state.taskPhases.length : 0;
+    const total = Math.max(1, tasks, Number(state && state.monthEntries) || 0);
+    const completed = (total - tasks) + Number((state && state.dateIndex) || 0);
+    return { current: completed + 1, total, percent: Math.round((completed / total) * 100) };
+  }
+
   function advancePlannedEntryState(state) {
     if (!state || !Array.isArray(state.taskPhases)) return undefined;
     const nextIndex = Number(state.dateIndex || 0) + 1;
@@ -114,6 +137,8 @@
     findScheduledWorkdays,
     planMissingEntries,
     advancePlannedEntryState,
+    countMonthEntries,
+    plannedEntryProgress,
     completedHoursMessage
   };
 });

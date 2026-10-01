@@ -1,9 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-let isFullDayPaidLeave, findMissingWorkdays, findScheduledWorkdays, planMissingEntries, advancePlannedEntryState, completedHoursMessage;
+let isFullDayPaidLeave, findMissingWorkdays, findScheduledWorkdays, planMissingEntries, advancePlannedEntryState, completedHoursMessage, countMonthEntries, plannedEntryProgress;
 try {
-  ({ isFullDayPaidLeave, findMissingWorkdays, findScheduledWorkdays, planMissingEntries, advancePlannedEntryState, completedHoursMessage } = require('../term-hours-model.js'));
+  ({ isFullDayPaidLeave, findMissingWorkdays, findScheduledWorkdays, planMissingEntries, advancePlannedEntryState, completedHoursMessage, countMonthEntries, plannedEntryProgress } = require('../term-hours-model.js'));
 } catch (_) {}
 
 test('describes a fully verified month in recent history', () => {
@@ -180,4 +180,43 @@ test('fails closed on impossible calendar dates', () => {
     ['2026-02-28']
   );
   assert.deepEqual(findScheduledWorkdays('2026-13', [{ day: 1, dayClass: 'mg_normal' }]), []);
+});
+
+// October 2026: 21 scheduled workdays (10/12 スポーツの日 excluded) = 63 entries.
+const OCTOBER = ['01', '02', '05', '06', '07', '08', '09', '13', '14', '15', '16',
+  '19', '20', '21', '22', '23', '26', '27', '28', '29', '30'].map(d => `2026-10-${d}`);
+
+test('counts the whole month of entries, skipping full-day paid leave', () => {
+  assert.equal(typeof countMonthEntries, 'function');
+  assert.equal(countMonthEntries(OCTOBER, []), 63);
+  // Filled days still count toward the month — they are progress already made.
+  const filled = { day: 1, hasArrival: true, hasDeparture: true, hasBreak: true, rowText: '10/1 木' };
+  assert.equal(countMonthEntries(OCTOBER, [filled]), 63);
+  const leave = { day: 2, hasArrival: false, hasDeparture: false, rowText: '10/2 金 年休（日） 年次有給休暇 全日' };
+  assert.equal(countMonthEntries(OCTOBER, [leave]), 60);
+});
+
+test('resumes progress from the month already done instead of restarting at 0%', () => {
+  assert.equal(typeof plannedEntryProgress, 'function');
+  // Stopped after 10/21 (14 workdays = 42 entries done); 7 workdays = 21 entries remain.
+  const remaining = OCTOBER.slice(14);
+  const tasks = remaining.flatMap(date => ['clockin', 'clockout', 'break'].map(phase => ({ date, phase })));
+  const state = {
+    phase: 'clockin',
+    dates: tasks.map(t => t.date),
+    taskPhases: tasks.map(t => t.phase),
+    dateIndex: 0,
+    monthEntries: 63,
+  };
+  assert.deepEqual(plannedEntryProgress(state), { current: 43, total: 63, percent: 67 });
+  assert.deepEqual(plannedEntryProgress({ ...state, dateIndex: 20 }), { current: 63, total: 63, percent: 98 });
+  // A fresh month counts from 1 of the same 63.
+  const fresh = OCTOBER.flatMap(date => ['clockin', 'clockout', 'break'].map(phase => ({ date, phase })));
+  assert.deepEqual(
+    plannedEntryProgress({ ...state, dates: fresh.map(t => t.date), taskPhases: fresh.map(t => t.phase), dateIndex: 4 }),
+    { current: 5, total: 63, percent: 6 }
+  );
+  // A run planned before this change (no monthEntries) keeps counting its own tasks.
+  const { monthEntries, ...legacy } = state;
+  assert.deepEqual(plannedEntryProgress(legacy), { current: 1, total: 21, percent: 0 });
 });
